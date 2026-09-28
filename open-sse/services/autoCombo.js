@@ -20,22 +20,125 @@ function rankOf(model, ranks) {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Deterministic provider/model order used to break ties and order unscored rows. */
+function compareModelNames(a, b) {
+  const sa = String(a);
+  const sb = String(b);
+  if (sa === sb) return 0;
+  return sa < sb ? -1 : 1;
+}
+
 /**
  * Order models highest rank first (higher number = smarter).
- * Stable; models without a rank keep relative order at the end.
+ * Scored models always precede unscored ones; equal scores and unscored models
+ * fall back to deterministic provider/model order, so the list is stable across
+ * reloads regardless of the input array's order.
  */
 export function orderByRank(models, ranks = {}) {
   if (!Array.isArray(models) || models.length <= 1) return models;
   return models
     .map((m, i) => ({ m, i, r: rankOf(m, ranks) }))
     .sort((a, b) => {
-      if (a.r === null && b.r === null) return a.i - b.i;
+      if (a.r === null && b.r === null) return compareModelNames(a.m, b.m);
       if (a.r === null) return 1;
       if (b.r === null) return -1;
       if (b.r !== a.r) return b.r - a.r;
-      return a.i - b.i;
+      return compareModelNames(a.m, b.m);
     })
     .map((x) => x.m);
+}
+
+/**
+ * Build the dashboard rank list: every eligible model as `{ model, rank }`,
+ * scored models first (highest score = smartest), equal scores and unscored
+ * models ordered deterministically by provider/model, with unscored models
+ * always last. `rank` is `null` for an unscored (blank) row.
+ */
+export function buildRankRows(models, ranks = {}) {
+  if (!Array.isArray(models) || models.length === 0) return [];
+  const seen = new Set();
+  const unique = [];
+  for (const m of models) {
+    if (typeof m !== "string" || !m.includes("/")) continue;
+    if (seen.has(m)) continue;
+    seen.add(m);
+    unique.push(m);
+  }
+  return orderByRank(unique, ranks).map((m) => ({ model: m, rank: rankOf(m, ranks) }));
+}
+
+/**
+ * Parse a raw inline score input.
+ * - `{ kind: "value", value }` for a finite number (number or numeric string)
+ * - `{ kind: "empty" }` for blank input, which intentionally clears the score
+ * - `{ kind: "invalid" }` for non-numeric garbage, so a typo can never silently
+ *   clear an existing score or write a corrupt one
+ */
+export function parseScoreInput(raw) {
+  if (raw === null || raw === undefined) return { kind: "empty" };
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) ? { kind: "value", value: raw } : { kind: "invalid" };
+  }
+  if (typeof raw !== "string") return { kind: "invalid" };
+  const trimmed = raw.trim();
+  if (trimmed === "") return { kind: "empty" };
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? { kind: "value", value: n } : { kind: "invalid" };
+}
+
+/**
+ * Return a new ranks map with `model` set to `score`, or with `model` removed
+ * when `score` is null/undefined (clear). Never mutates the input.
+ */
+export function applyModelScore(ranks, model, score) {
+  const src = ranks && typeof ranks === "object" && !Array.isArray(ranks) ? ranks : {};
+  if (typeof model !== "string" || !model.includes("/")) return { ...src };
+  const next = { ...src };
+  if (score === null || score === undefined) {
+    delete next[model];
+    return next;
+  }
+  const n = typeof score === "number" ? score : Number(score);
+  if (Number.isFinite(n)) next[model] = n;
+  return next;
+}
+
+/**
+ * Resolve the value shown in a row's inline score editor. An explicit draft
+ * (including an empty string the user blanked out) wins; otherwise fall back to
+ * the saved score, or an empty string when the model is unscored.
+ */
+export function resolveScoreDraft(draft, savedScore) {
+  if (draft !== undefined && draft !== null) return draft;
+  return savedScore === null || savedScore === undefined ? "" : String(savedScore);
+}
+
+/**
+ * Monotonic request gate for the rank list. Every GET/PUT takes a token via
+ * `begin()`; a response is applied only while its token is still current.
+ * Starting a newer request (a save, or a later refresh) invalidates any in-flight
+ * fetch, so a late GET can never overwrite a newer successful PUT or roll back
+ * drafts the user typed after the GET was issued.
+ */
+export function createRequestGate() {
+  let seq = 0;
+  return {
+    begin() {
+      seq += 1;
+      return seq;
+    },
+    isCurrent(token) {
+      return token === seq;
+    },
+  };
+}
+
+/**
+ * Whether the inline score editor should be locked. Any in-flight save or refresh
+ * disables score inputs and Save/Clear so mutations and refetches stay serialized.
+ */
+export function isRankEditorBusy({ saving = false, refreshing = false } = {}) {
+  return Boolean(saving || refreshing);
 }
 
 // Exponential cooldown ladder: 1m, 5m, 15m, 30m, max 60m.

@@ -116,6 +116,25 @@ export async function getAvailableAutoModels({ liveModels = [] } = {}) {
     }
   }
 
+  // Active no-auth free providers route without a stored connection row, so
+  // enumerate their registered static catalog to make those models candidates.
+  for (const [providerId, p] of Object.entries(FREE_PROVIDERS || {})) {
+    if (!p?.noAuth) continue;
+    const staticAlias = PROVIDER_ID_TO_ALIAS[providerId] || providerId;
+    const outputAlias = String(getProviderAlias(providerId) || staticAlias).trim();
+    if (!outputAlias) continue;
+    const staticModels = PROVIDER_MODELS[staticAlias] || PROVIDER_MODELS[outputAlias] || [];
+    for (const m of staticModels) {
+      let id = typeof m?.id === "string" ? m.id : "";
+      if (!id) continue;
+      if (id.startsWith(`${outputAlias}/`)) id = id.slice(outputAlias.length + 1);
+      else if (id.startsWith(`${staticAlias}/`)) id = id.slice(staticAlias.length + 1);
+      else if (id.startsWith(`${providerId}/`)) id = id.slice(providerId.length + 1);
+      if (!id) continue;
+      seen.set(`${outputAlias}/${id}`, true);
+    }
+  }
+
   // Custom + alias targets only route when their provider has an active
   // connection; disconnected entries must not enter the pool.
   for (const m of customModels || []) {

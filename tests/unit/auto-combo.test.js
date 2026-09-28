@@ -14,6 +14,12 @@ import {
   buildAutoProbeBody,
   parseRanksPayload,
   shouldPromoteLkgp,
+  buildRankRows,
+  parseScoreInput,
+  applyModelScore,
+  resolveScoreDraft,
+  createRequestGate,
+  isRankEditorBusy,
 } from "../../open-sse/services/autoCombo.js";
 
 describe("auto/smart virtual combo ranking", () => {
@@ -27,6 +33,112 @@ describe("auto/smart virtual combo ranking", () => {
     const models = ["b/model-2", "a/model-1", "c/model-3"];
     const ranks = { "a/model-1": 1, "b/model-2": 2, "c/model-3": 3 };
     expect(orderByRank(models, ranks)).toEqual(["c/model-3", "b/model-2", "a/model-1"]);
+  });
+
+  it("breaks equal-rank ties and orders unscored models deterministically by provider/model", () => {
+    const models = ["z/m", "b/m", "a/m", "m/c", "m/a"];
+    const ranks = { "z/m": 5, "b/m": 5, "m/c": 5 };
+    expect(orderByRank(models, ranks)).toEqual(["b/m", "m/c", "z/m", "a/m", "m/a"]);
+  });
+});
+
+describe("auto/smart inline score rows", () => {
+  it("builds scored-first rows with deterministic ties and unscored eligible rows last", () => {
+    const models = ["p/b", "p/a", "p/d", "p/c", "p/a"];
+    const ranks = { "p/a": 5, "p/b": 5, "p/c": 10 };
+    expect(buildRankRows(models, ranks)).toEqual([
+      { model: "p/c", rank: 10 },
+      { model: "p/a", rank: 5 },
+      { model: "p/b", rank: 5 },
+      { model: "p/d", rank: null },
+    ]);
+  });
+
+  it("treats malformed stored scores as unscored", () => {
+    const rows = buildRankRows(["p/a", "p/b"], { "p/a": NaN, "p/b": "nope" });
+    expect(rows).toEqual([
+      { model: "p/a", rank: null },
+      { model: "p/b", rank: null },
+    ]);
+  });
+});
+
+describe("auto/smart inline score input helpers", () => {
+  it("parses valid numeric scores", () => {
+    expect(parseScoreInput("7")).toEqual({ kind: "value", value: 7 });
+    expect(parseScoreInput(3.5)).toEqual({ kind: "value", value: 3.5 });
+    expect(parseScoreInput("  12 ")).toEqual({ kind: "value", value: 12 });
+  });
+
+  it("treats blank input as an explicit clear", () => {
+    expect(parseScoreInput("")).toEqual({ kind: "empty" });
+    expect(parseScoreInput("   ")).toEqual({ kind: "empty" });
+    expect(parseScoreInput(null)).toEqual({ kind: "empty" });
+    expect(parseScoreInput(undefined)).toEqual({ kind: "empty" });
+  });
+
+  it("rejects non-numeric garbage so it cannot silently clear or corrupt a score", () => {
+    for (const bad of ["abc", "1e", "Infinity", NaN, Infinity, true, {}, []]) {
+      expect(parseScoreInput(bad)).toEqual({ kind: "invalid" });
+    }
+  });
+
+  it("applies, updates, and clears a model score without mutating the input", () => {
+    const base = { "p/a": 1 };
+    expect(applyModelScore(base, "p/b", 9)).toEqual({ "p/a": 1, "p/b": 9 });
+    expect(applyModelScore({ "p/a": 1, "p/b": 9 }, "p/b", 2)).toEqual({ "p/a": 1, "p/b": 2 });
+    expect(applyModelScore({ "p/a": 1, "p/b": 9 }, "p/b", null)).toEqual({ "p/a": 1 });
+    expect(base).toEqual({ "p/a": 1 });
+  });
+
+  it("resolves the editable row value: saved score until edited, blank clears", () => {
+    // No draft yet: show the saved score (an untouched Save must not clear it).
+    expect(resolveScoreDraft(undefined, 5)).toBe("5");
+    expect(resolveScoreDraft(undefined, null)).toBe("");
+    expect(resolveScoreDraft(undefined, undefined)).toBe("");
+    // Editing (including blanking) wins over the saved score.
+    expect(resolveScoreDraft("9", 5)).toBe("9");
+    expect(resolveScoreDraft("", 5)).toBe("");
+  });
+
+  it("re-sorts immediately after a successful score change (highest rises to the top)", () => {
+    const before = { "p/a": 1, "p/b": 2 };
+    const after = applyModelScore(before, "p/a", 100);
+    expect(buildRankRows(["p/a", "p/b"], after)).toEqual([
+      { model: "p/a", rank: 100 },
+      { model: "p/b", rank: 2 },
+    ]);
+  });
+});
+
+describe("auto/smart rank list request gating", () => {
+  it("ignores a refresh GET that resolves after a newer mutation began (late GET vs PUT)", () => {
+    const gate = createRequestGate();
+    const getToken = gate.begin(); // refresh GET is in flight
+    gate.begin(); // user Save starts a newer PUT
+    expect(gate.isCurrent(getToken)).toBe(false);
+  });
+
+  it("accepts only the newest of overlapping requests", () => {
+    const gate = createRequestGate();
+    const first = gate.begin();
+    const second = gate.begin();
+    expect(gate.isCurrent(first)).toBe(false);
+    expect(gate.isCurrent(second)).toBe(true);
+  });
+
+  it("accepts a refetch that starts after the mutation completed", () => {
+    const gate = createRequestGate();
+    gate.begin(); // PUT
+    const getToken = gate.begin(); // later refresh
+    expect(gate.isCurrent(getToken)).toBe(true);
+  });
+
+  it("disables score editing while a save or refresh is in flight", () => {
+    expect(isRankEditorBusy({ saving: false, refreshing: false })).toBe(false);
+    expect(isRankEditorBusy({ saving: true })).toBe(true);
+    expect(isRankEditorBusy({ refreshing: true })).toBe(true);
+    expect(isRankEditorBusy({})).toBe(false);
   });
 });
 

@@ -8,11 +8,14 @@ export const dynamic = "force-dynamic";
 // GET /api/models/ranks - manual intelligence ranking (higher number = smarter)
 // Also returns the server-side candidate models so the dashboard does not need
 // to call the public, API-key-guarded /api/v1/models from the browser.
+// An eligibility lookup failure is surfaced as a non-2xx error (never a 200 with
+// an empty candidate list) so the dashboard shows a load error instead of a
+// false "no eligible models".
 export async function GET() {
   try {
     const [ranks, models] = await Promise.all([
       getModelRanks(),
-      getAvailableAutoModels().catch(() => []),
+      getAvailableAutoModels(),
     ]);
     return NextResponse.json({ ranks, models });
   } catch (error) {

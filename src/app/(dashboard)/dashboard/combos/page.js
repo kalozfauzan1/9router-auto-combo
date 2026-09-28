@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -9,6 +9,7 @@ import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, ConfirmModa
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
+import { buildRankRows, parseScoreInput, applyModelScore, resolveScoreDraft, createRequestGate, isRankEditorBusy } from "open-sse/services/autoCombo.js";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
@@ -1012,151 +1013,242 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
 function AutoComboSection() {
   const [ranks, setRanks] = useState({});
   const [models, setModels] = useState([]);
-  const [draft, setDraft] = useState({ model: "", rank: "" });
+  const [drafts, setDrafts] = useState({});
+  const [rowErrors, setRowErrors] = useState({});
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [saveError, setSaveError] = useState("");
+  const [reloadNonce, setReloadNonce] = useState(0);
+
+  // Serializes GET/PUT: any newer request invalidates an in-flight one, so a late
+  // refresh response can never clobber a newer saved score or the user's drafts.
+  const requestGateRef = useRef(createRequestGate());
 
   useEffect(() => {
+    let cancelled = false;
+    const token = requestGateRef.current.begin();
     (async () => {
       try {
-        const ranksRes = await fetch("/api/models/ranks");
+        const ranksRes = await fetch("/api/models/ranks", { cache: "no-store" });
+        if (cancelled || !requestGateRef.current.isCurrent(token)) return;
         if (!ranksRes.ok) {
           const err = await ranksRes.json().catch(() => ({}));
-          setLoadError(err.error || `Failed to load ranks (${ranksRes.status})`);
+          if (!cancelled && requestGateRef.current.isCurrent(token)) {
+            setLoadError(err.error || `Failed to load ranks (${ranksRes.status})`);
+          }
           return;
         }
         const data = await ranksRes.json();
-        setRanks(data.ranks || {});
+        if (cancelled || !requestGateRef.current.isCurrent(token)) return;
         // Candidate models come from the dashboard-guarded ranks endpoint,
         // not the public API-key-guarded /api/v1/models.
+        setRanks(data.ranks || {});
         setModels((data.models || []).filter((id) => typeof id === "string" && id.includes("/")));
+        setDrafts({});
+        setRowErrors({});
         setLoadError("");
       } catch (error) {
-        console.log("Error loading auto combo ranks:", error);
-        setLoadError("Failed to load ranks — network error");
+        if (!cancelled && requestGateRef.current.isCurrent(token)) {
+          console.error("Error loading auto combo ranks:", error);
+          setLoadError("Failed to load ranks — network error");
+        }
       } finally {
-        setLoaded(true);
+        if (!cancelled) {
+          setLoaded(true);
+          setRefreshing(false);
+        }
       }
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [reloadNonce]);
 
-  const persist = async (next) => {
-    const previous = ranks;
-    // Optimistic update; rolled back on any failure.
-    setRanks(next);
+  // Every eligible model is a row (scored first, then blank); a rank only enters
+  // routing once saved. No optimistic write: the saved map is authoritative, so a
+  // failed save leaves the server state and the visible rows untouched.
+  const rows = buildRankRows(models, ranks);
+  const busy = isRankEditorBusy({ saving, refreshing });
+
+  const persist = async (next, model) => {
     setSaving(true);
+    setSaveError("");
+    // Invalidate any in-flight refresh GET before the mutation.
+    const token = requestGateRef.current.begin();
     try {
       const res = await fetch("/api/models/ranks", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ranks: next }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setRanks(data.ranks || next);
-      } else {
+      if (!requestGateRef.current.isCurrent(token)) return;
+      if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        setRanks(previous);
-        alert(err.error || "Failed to save ranks");
+        if (requestGateRef.current.isCurrent(token)) {
+          setSaveError(err.error || `Failed to save score (${res.status})`);
+        }
+        return;
       }
+      const data = await res.json();
+      if (!requestGateRef.current.isCurrent(token)) return;
+      setRanks(data.ranks || next);
+      setDrafts((prev) => {
+        const copy = { ...prev };
+        delete copy[model];
+        return copy;
+      });
+      setRowErrors((prev) => {
+        const copy = { ...prev };
+        delete copy[model];
+        return copy;
+      });
     } catch (error) {
-      console.log("Error saving ranks:", error);
-      setRanks(previous);
-      alert("Failed to save ranks — network error");
+      if (requestGateRef.current.isCurrent(token)) {
+        console.error("Error saving ranks:", error);
+        setSaveError("Failed to save score — network error");
+      }
     } finally {
       setSaving(false);
     }
   };
 
-  const ranked = Object.entries(ranks).sort((a, b) => b[1] - a[1]);
+  const saveRow = async (model) => {
+    // No draft means the input still shows the saved score; treat that as the
+    // value so an untouched Save is a no-op instead of an accidental clear.
+    const raw = resolveScoreDraft(drafts[model], ranks[model]);
+    const parsed = parseScoreInput(raw);
+    if (parsed.kind === "invalid") {
+      setRowErrors((prev) => ({ ...prev, [model]: "Enter a number, or leave blank to clear" }));
+      return;
+    }
+    const score = parsed.kind === "empty" ? null : parsed.value;
+    await persist(applyModelScore(ranks, model, score), model);
+  };
+
+  const clearRow = async (model) => {
+    setDrafts((prev) => {
+      const copy = { ...prev };
+      delete copy[model];
+      return copy;
+    });
+    await persist(applyModelScore(ranks, model, null), model);
+  };
 
   return (
     <Card padding="sm">
       <div className="flex flex-col gap-1">
         <p className="text-sm font-medium">Auto / Smart</p>
         <p className="text-xs text-text-muted">
-          Default virtual combos. Assign intelligence ranks (higher number = smarter);
-          auto/smart tries ranked models highest-first with LKGP + circuit-breaker fallback.
-          Only ranked, enabled models are included automatically.
+          Default virtual combos. Every eligible registered model is listed — set an
+          inline score (higher number = smarter). Scored models route highest-first with
+          LKGP + circuit-breaker fallback; unscored models stay out of routing until saved.
         </p>
       </div>
+      <div className="mt-2 flex items-center justify-end">
+        <button
+          type="button"
+          disabled={busy || !loaded}
+          onClick={() => {
+            setRefreshing(true);
+            setReloadNonce((n) => n + 1);
+          }}
+          className="rounded px-2 py-1 text-xs text-text-muted hover:text-primary hover:bg-black/5 disabled:opacity-40 dark:hover:bg-white/5"
+          title="Refresh eligible models from the server"
+        >
+          {refreshing ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
       {!loaded ? (
-        <p className="mt-3 text-xs text-text-muted">Loading ranks…</p>
+        <p className="mt-1 text-xs text-text-muted">Loading models…</p>
       ) : loadError ? (
-        <p className="mt-3 text-xs text-red-500">{loadError} — editing disabled.</p>
+        <p className="mt-1 text-xs text-red-500">{loadError} — editing disabled.</p>
       ) : (
-        <div className="mt-3 flex flex-col gap-2">
-          {ranked.length === 0 ? (
-            <p className="text-xs text-text-muted italic">No ranks assigned yet.</p>
+        <div className="mt-1 flex flex-col gap-2">
+          {saveError ? <p className="text-xs text-red-500">{saveError}</p> : null}
+          {rows.length === 0 ? (
+            <p className="text-xs text-text-muted italic">
+              No eligible models. Add a provider connection or key, then refresh.
+            </p>
           ) : (
             <div className="overflow-hidden rounded-lg border border-border/50">
               <table className="w-full text-left text-xs">
                 <thead>
                   <tr className="border-b border-border/40 bg-black/[0.02] text-text-muted dark:bg-white/[0.02]">
                     <th className="px-3 py-1.5 font-medium">Model</th>
-                    <th className="w-24 px-3 py-1.5 font-medium text-center">Rank</th>
-                    <th className="w-12 px-3 py-1.5" />
+                    <th className="w-28 px-3 py-1.5 font-medium text-center">Score</th>
+                    <th className="w-28 px-3 py-1.5" />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border/30 font-mono">
-                  {ranked.map(([model, rank]) => (
-                    <tr key={model}>
-                      <td className="px-3 py-2 text-text-main">{model}</td>
-                      <td className="px-3 py-2 text-center">{rank}</td>
-                      <td className="px-3 py-2 text-right">
-                        <button
-                          type="button"
-                          disabled={saving}
-                          onClick={() => {
-                            const next = { ...ranks };
-                            delete next[model];
-                            persist(next);
-                          }}
-                          className="p-1 rounded text-text-muted hover:text-red-500 hover:bg-red-500/10"
-                          title="Remove rank"
-                        >
-                          <span className="material-symbols-outlined text-[16px] leading-none">close</span>
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {rows.map(({ model, rank }) => {
+                    const value = resolveScoreDraft(drafts[model], rank);
+                    return (
+                      <tr key={model}>
+                        <td className="px-3 py-1.5 text-text-main break-all">{model}</td>
+                        <td className="px-3 py-1.5">
+                          <input
+                            value={value}
+                            disabled={busy}
+                            onChange={(e) => {
+                              const next = e.target.value;
+                              setDrafts((prev) => ({ ...prev, [model]: next }));
+                              setRowErrors((prev) => {
+                                if (!prev[model]) return prev;
+                                const copy = { ...prev };
+                                delete copy[model];
+                                return copy;
+                              });
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                saveRow(model);
+                              }
+                            }}
+                            inputMode="numeric"
+                            placeholder="score"
+                            aria-label={`Score for ${model}`}
+                            className={`w-24 rounded border bg-transparent px-2 py-1 text-center outline-none disabled:opacity-50 ${
+                              rowErrors[model] ? "border-red-500" : "border-border/50"
+                            }`}
+                          />
+                        </td>
+                        <td className="px-3 py-1.5">
+                          <div className="flex items-center justify-end gap-1">
+                            {rowErrors[model] ? (
+                              <span className="text-[10px] text-red-500" title={rowErrors[model]}>
+                                invalid
+                              </span>
+                            ) : null}
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => saveRow(model)}
+                              className="rounded px-1.5 py-0.5 text-text-muted hover:text-primary hover:bg-black/5 disabled:opacity-40 dark:hover:bg-white/5"
+                              title={rank === null ? "Save score" : "Update score"}
+                            >
+                              Save
+                            </button>
+                            {rank !== null ? (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => clearRow(model)}
+                                className="rounded px-1.5 py-0.5 text-text-muted hover:text-red-500 hover:bg-red-500/10 disabled:opacity-40"
+                                title="Clear score (removes from routing)"
+                              >
+                                Clear
+                              </button>
+                            ) : null}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           )}
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input
-              list="auto-combo-models"
-              value={draft.model}
-              onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-              placeholder="provider/model"
-              className="min-w-0 flex-1 rounded border border-border/50 bg-transparent px-2 py-1.5 font-mono text-xs outline-none"
-            />
-            <datalist id="auto-combo-models">
-              {models.slice(0, 200).map((id) => (
-                <option key={id} value={id} />
-              ))}
-            </datalist>
-            <input
-              value={draft.rank}
-              onChange={(e) => setDraft({ ...draft, rank: e.target.value })}
-              placeholder="rank"
-              inputMode="numeric"
-              className="w-full sm:w-24 rounded border border-border/50 bg-transparent px-2 py-1.5 font-mono text-xs outline-none"
-            />
-            <Button
-              size="sm"
-              disabled={saving || !draft.model.includes("/") || !Number.isFinite(Number(draft.rank))}
-              onClick={() => {
-                const next = { ...ranks, [draft.model.trim()]: Number(draft.rank) };
-                setDraft({ model: "", rank: "" });
-                persist(next);
-              }}
-            >
-              Save rank
-            </Button>
-          </div>
         </div>
       )}
     </Card>

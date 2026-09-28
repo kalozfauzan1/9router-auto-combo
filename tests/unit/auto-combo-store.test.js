@@ -127,6 +127,40 @@ describe("auto/smart rank-aware LKGP promotion", () => {
   });
 });
 
+describe("auto/smart candidate eligibility", () => {
+  it("includes active no-auth free provider models without a stored connection", async () => {
+    const candidates = await svc.getAvailableAutoModels();
+    expect(candidates.some((m) => m.startsWith("oc/"))).toBe(true);
+  });
+
+  it("routes a scored eligible model but never routes unscored candidates", async () => {
+    const candidates = await svc.getAvailableAutoModels();
+    const freeModels = candidates.filter((m) => m.startsWith("oc/"));
+    expect(freeModels.length).toBeGreaterThan(1);
+    await repo.setModelRanks({ [freeModels[0]]: 7 });
+    const ranked = await svc.getAutoRankedModels();
+    expect(ranked).toContain(freeModels[0]);
+    expect(ranked).not.toContain(freeModels[1]);
+  });
+
+  it("drops a candidate and its routing when the provider connection is deactivated", async () => {
+    const conn = await dbx.createProviderConnection({
+      provider: "deact-prov",
+      authType: "apikey",
+      name: "deact",
+      apiKey: "k",
+      providerSpecificData: { enabledModels: ["deact-prov/m1"] },
+    });
+    await repo.setModelRanks({ "deact-prov/m1": 3 });
+    expect(await svc.getAutoRankedModels()).toContain("deact-prov/m1");
+
+    await dbx.updateProviderConnection(conn.id, { isActive: false });
+    const candidates = await svc.getAvailableAutoModels();
+    expect(candidates).not.toContain("deact-prov/m1");
+    expect(await svc.getAutoRankedModels()).not.toContain("deact-prov/m1");
+  });
+});
+
 describe("auto/smart persistence separation", () => {
   it("stores ranking as model config separately from runtime health/LKGP", async () => {
     await repo.setModelRank("test-provider/test-model", 42);
