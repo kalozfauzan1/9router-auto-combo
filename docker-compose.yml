@@ -8,7 +8,7 @@ services:
     container_name: 9router-auto-combo
     restart: always
     ports:
-      - "20128:20128"
+      - "20129:20129"
     volumes:
       - 9router-data:/app/data
     env_file:
@@ -18,7 +18,7 @@ services:
         required: false
     environment:
       DATA_DIR: /app/data
-      PORT: "20128"
+      PORT: "20129"
       HOSTNAME: "0.0.0.0"
       NODE_ENV: production
 
