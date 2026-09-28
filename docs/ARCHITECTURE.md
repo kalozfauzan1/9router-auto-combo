@@ -239,6 +239,48 @@ flowchart TD
 
 Fallback decisions are driven by `open-sse/services/accountFallback.js` using status codes and error-message heuristics.
 
+## Auto / Smart Default Virtual Combo
+
+`auto` and `smart` are default virtual combos (no DB row required) backed by
+`open-sse/services/autoCombo.js` + `src/sse/services/autoComboService.js`:
+
+- Manual intelligence ranking persisted as model configuration in the `modelRanks`
+  kv scope (`ranks` key: `{ "provider/model": rank }`, higher number = smarter).
+  Only ranked, enabled, non-disabled models are included automatically, ordered
+  highest rank first. A DB combo literally named `auto`/`smart` keeps precedence.
+- Runtime health and LKGP (last-known-good model) persist separately: per-model
+  circuit state in the `autoComboHealth` kv scope (`{ failures, cooldownUntil }`)
+  and LKGP in the `autoComboState` kv scope. After the top model fails, later
+  requests start directly at LKGP instead of retrying the failed higher model.
+- Per-model circuit states: `healthy` / `cooldown` / `probing`, with exponential
+  cooldown 1m → 5m → 15m → 30m → max 60m. After cooldown expiry a single
+  lightweight recovery probe runs per model (single probe in flight); if a
+  higher-ranked probe succeeds, LKGP returns to it.
+- Transient-only fallback: 429/quota-exhaustion, timeout/network, 5xx/model
+  unavailable. No fallback for invalid-request, moderation, or context errors;
+  401/403 auth/config failures disable the model from retries (config-error).
+- Ranking API: `GET`/`PUT /api/models/ranks`; dashboard ranking UI lives on the
+  combos page; `auto`/`smart` are advertised in `GET /v1/models`. `GET` also
+  returns server-side candidate models (dashboard-guarded), so the browser never
+  calls the public API-key-guarded `/api/v1/models`. `PUT` is all-or-nothing: a
+  malformed key/value rejects the whole payload with 400 and preserves the
+  existing map.
+- Routing coverage & concurrency: candidate routing requires membership in
+  registered sources (enabledModels, static catalog, custom models, aliases) or
+  an injected runtime-discovered/live catalog — a mistyped ranked ID sharing an
+  active provider prefix is excluded, as are custom/alias targets whose provider
+  has no active connection. Failure counters are incremented atomically (single
+  DB transaction) so concurrent failures do not collapse. LKGP promotion is
+  rank-aware and transactional, so a lower-ranked main-path success cannot
+  overwrite a higher-ranked concurrent probe success.
+- Failed-but-expired models are probe-only: never retried on the main path (even
+  when LKGP is unset), so a user request and its recovery probe never hit the
+  same model at once. The probe lock is pool-scoped (one probe total, shared by
+  auto/smart) and fires before the empty-order 503, so a fully-expired pool still
+  recovers while the current request is answered 503. Recovery probes reuse the source request
+  format but send only a minimal `ping` with a tiny token bound (incl. Gemini /
+  Antigravity `generationConfig.maxOutputTokens`) and no user prompt/tools/system.
+
 ## OAuth Onboarding and Token Refresh Lifecycle
 
 ```mermaid

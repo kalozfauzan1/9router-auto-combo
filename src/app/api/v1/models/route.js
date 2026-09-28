@@ -329,6 +329,17 @@ export async function buildModelsList(kindFilter, options = {}) {
     models.push(entry);
   }
 
+  // Default virtual combos auto/smart: advertised when no DB combo claims the
+  // name, so clients can select them without manual combo setup.
+  if (kindFilter.includes(LLM_KIND)) {
+    const comboNames = new Set(combos.map((c) => c.name));
+    for (const virtual of ["auto", "smart"]) {
+      if (!comboNames.has(virtual)) {
+        models.push({ id: virtual, object: "model", owned_by: "auto" });
+      }
+    }
+  }
+
   if (connections.length === 0) {
     // DB unavailable -> return static models, filtered by per-model kind
     const aliasToProviderId = Object.fromEntries(

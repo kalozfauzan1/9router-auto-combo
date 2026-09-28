@@ -1,6 +1,8 @@
 // Re-export from open-sse with localDb integration
 import { getModelAliases, getComboByName, getProviderNodes } from "@/lib/localDb";
 import { parseModel as parseModelCore, resolveModelAliasFromMap, getModelInfoCore } from "open-sse/services/model.js";
+import { isAutoComboName } from "open-sse/services/autoCombo.js";
+import { getAutoRankedModels } from "./autoComboService.js";
 import REGISTRY from "open-sse/providers/registry/index.js";
 
 // Local provider alias overrides (HMR-friendly, applied on top of open-sse map)
@@ -75,6 +77,12 @@ export async function getModelInfo(modelStr) {
     return { provider: null, model: parsed.model };
   }
 
+  // Default virtual combo auto/smart: resolves as a combo when no DB combo
+  // with that name exists, so existing combos keep precedence (API compatible).
+  if (isAutoComboName(parsed.model)) {
+    return { provider: null, model: parsed.model };
+  }
+
   return getModelInfoCore(modelStr, getModelAliases);
 }
 
@@ -89,6 +97,12 @@ export async function getComboModels(modelStr) {
   const combo = await getComboByName(modelStr);
   if (combo && combo.models && combo.models.length > 0) {
     return combo.models;
+  }
+
+  // Virtual auto/smart combo: dynamic ranked pool (DB combo keeps precedence).
+  if (isAutoComboName(modelStr)) {
+    const ranked = await getAutoRankedModels().catch(() => []);
+    return ranked && ranked.length > 0 ? ranked : null;
   }
   return null;
 }

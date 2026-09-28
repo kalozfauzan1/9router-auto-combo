@@ -517,6 +517,9 @@ export default function CombosPage() {
         getCaps={getCaps}
       />
 
+      {/* Auto / Smart virtual combo ranking */}
+      <AutoComboSection />
+
       {/* Create Modal - Use key to force remount and reset state */}
       {showCreateModal && (
         <ComboFormModal
@@ -1003,6 +1006,160 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
         <span className="material-symbols-outlined text-[12px]">close</span>
       </button>
     </div>
+  );
+}
+
+function AutoComboSection() {
+  const [ranks, setRanks] = useState({});
+  const [models, setModels] = useState([]);
+  const [draft, setDraft] = useState({ model: "", rank: "" });
+  const [saving, setSaving] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const ranksRes = await fetch("/api/models/ranks");
+        if (!ranksRes.ok) {
+          const err = await ranksRes.json().catch(() => ({}));
+          setLoadError(err.error || `Failed to load ranks (${ranksRes.status})`);
+          return;
+        }
+        const data = await ranksRes.json();
+        setRanks(data.ranks || {});
+        // Candidate models come from the dashboard-guarded ranks endpoint,
+        // not the public API-key-guarded /api/v1/models.
+        setModels((data.models || []).filter((id) => typeof id === "string" && id.includes("/")));
+        setLoadError("");
+      } catch (error) {
+        console.log("Error loading auto combo ranks:", error);
+        setLoadError("Failed to load ranks — network error");
+      } finally {
+        setLoaded(true);
+      }
+    })();
+  }, []);
+
+  const persist = async (next) => {
+    const previous = ranks;
+    // Optimistic update; rolled back on any failure.
+    setRanks(next);
+    setSaving(true);
+    try {
+      const res = await fetch("/api/models/ranks", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ranks: next }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setRanks(data.ranks || next);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setRanks(previous);
+        alert(err.error || "Failed to save ranks");
+      }
+    } catch (error) {
+      console.log("Error saving ranks:", error);
+      setRanks(previous);
+      alert("Failed to save ranks — network error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const ranked = Object.entries(ranks).sort((a, b) => b[1] - a[1]);
+
+  return (
+    <Card padding="sm">
+      <div className="flex flex-col gap-1">
+        <p className="text-sm font-medium">Auto / Smart</p>
+        <p className="text-xs text-text-muted">
+          Default virtual combos. Assign intelligence ranks (higher number = smarter);
+          auto/smart tries ranked models highest-first with LKGP + circuit-breaker fallback.
+          Only ranked, enabled models are included automatically.
+        </p>
+      </div>
+      {!loaded ? (
+        <p className="mt-3 text-xs text-text-muted">Loading ranks…</p>
+      ) : loadError ? (
+        <p className="mt-3 text-xs text-red-500">{loadError} — editing disabled.</p>
+      ) : (
+        <div className="mt-3 flex flex-col gap-2">
+          {ranked.length === 0 ? (
+            <p className="text-xs text-text-muted italic">No ranks assigned yet.</p>
+          ) : (
+            <div className="overflow-hidden rounded-lg border border-border/50">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-border/40 bg-black/[0.02] text-text-muted dark:bg-white/[0.02]">
+                    <th className="px-3 py-1.5 font-medium">Model</th>
+                    <th className="w-24 px-3 py-1.5 font-medium text-center">Rank</th>
+                    <th className="w-12 px-3 py-1.5" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border/30 font-mono">
+                  {ranked.map(([model, rank]) => (
+                    <tr key={model}>
+                      <td className="px-3 py-2 text-text-main">{model}</td>
+                      <td className="px-3 py-2 text-center">{rank}</td>
+                      <td className="px-3 py-2 text-right">
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={() => {
+                            const next = { ...ranks };
+                            delete next[model];
+                            persist(next);
+                          }}
+                          className="p-1 rounded text-text-muted hover:text-red-500 hover:bg-red-500/10"
+                          title="Remove rank"
+                        >
+                          <span className="material-symbols-outlined text-[16px] leading-none">close</span>
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <input
+              list="auto-combo-models"
+              value={draft.model}
+              onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+              placeholder="provider/model"
+              className="min-w-0 flex-1 rounded border border-border/50 bg-transparent px-2 py-1.5 font-mono text-xs outline-none"
+            />
+            <datalist id="auto-combo-models">
+              {models.slice(0, 200).map((id) => (
+                <option key={id} value={id} />
+              ))}
+            </datalist>
+            <input
+              value={draft.rank}
+              onChange={(e) => setDraft({ ...draft, rank: e.target.value })}
+              placeholder="rank"
+              inputMode="numeric"
+              className="w-full sm:w-24 rounded border border-border/50 bg-transparent px-2 py-1.5 font-mono text-xs outline-none"
+            />
+            <Button
+              size="sm"
+              disabled={saving || !draft.model.includes("/") || !Number.isFinite(Number(draft.rank))}
+              onClick={() => {
+                const next = { ...ranks, [draft.model.trim()]: Number(draft.rank) };
+                setDraft({ model: "", rank: "" });
+                persist(next);
+              }}
+            >
+              Save rank
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

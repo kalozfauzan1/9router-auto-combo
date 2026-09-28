@@ -1,3 +1,12 @@
+# Unreleased
+
+## Features
+- **Combos**: default virtual `auto`/`smart` combo with manual intelligence ranking (higher number = smarter), LKGP + per-model circuit breaker (healthy/cooldown/probing, 1m/5m/15m/30m/max 60m), transient-only fallback, and `GET`/`PUT /api/models/ranks` plus combos-page ranking UI
+
+## Fixes
+- **Combos (auto/smart)**: auth/config errors (401/403) stop without fallback; open circuits are never retried (503 when all cooling); failed-but-expired models are probe-only (never retried on the main path, even with no LKGP) so a request and its recovery probe never hit the same model; when every circuit is expired the guarded probe still runs (pool-wide single-probe lock shared by auto/smart) and the current request returns 503 so the pool can recover; never-failed/promoted higher ranks are promoted ahead of LKGP; LKGP promotion is rank-aware and transactional (a lower-ranked success cannot clobber a higher-ranked probe success); failure counters update atomically under concurrency; candidate routing requires membership in registered/enabled/static/custom/alias or an injected live-discovered catalog (mistyped ranked IDs excluded, disconnected custom/alias targets excluded); recovery probes send a sanitized minimal ping (no user prompt/tools, tiny token bound incl. Gemini/Antigravity `generationConfig.maxOutputTokens`); rank `PUT` is all-or-nothing with strict key validation (trim, non-empty provider/model around the first slash) returning 400 without mutating; dashboard uses the guarded ranks candidate list, shows an error with editing disabled on load failure, and rolls back optimistic edits on failure
+- **Docker**: `docker-compose.yml` `.env` is optional and `DOCKER.md` documents `cp .env.example .env`
+
 # v0.5.91 (2026-09-26)
 
 ## Features

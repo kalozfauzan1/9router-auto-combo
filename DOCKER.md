@@ -92,6 +92,36 @@ In the dashboard, open `Endpoint` → `Token Saver` → `Headroom`, confirm the 
 
 If Headroom runs on the Docker host instead of as a sidecar, use `http://host.docker.internal:8787` on macOS/Windows. On Linux, add `--add-host=host.docker.internal:host-gateway` or the equivalent compose `extra_hosts` entry.
 
+## Deploy this fork via Compose (auto-combo)
+
+`docker-compose.yml` builds the `9router` service directly from this fork
+(`https://github.com/kalozfauzan1/9router-auto-combo`, branch `master`) and tags
+the local image `9router-auto-combo:master`. The `headroom` sidecar still uses its
+published image (`ghcr.io/chopratejas/headroom:latest`) and is unchanged.
+
+```bash
+cp .env.example .env               # create env file (set JWT_SECRET / INITIAL_PASSWORD)
+docker compose up -d --build   # first deploy: builds 9router from Git, pulls headroom
+docker compose logs -f 9router  # view logs (service key)
+docker compose stop            # stop
+docker compose start           # start again
+docker compose down            # remove containers (named volume 9router-data is kept)
+```
+
+`.env` is declared optional in `docker-compose.yml` (`env_file.required: false`), so a
+missing file will not abort the deploy — but `JWT_SECRET` and `INITIAL_PASSWORD` in
+`.env` are strongly recommended (see `.env.example`). Compose `environment:` values
+(`DATA_DIR`, `PORT`, …) take precedence over the file.
+
+To update to the latest `master`:
+
+```bash
+docker compose build --no-cache 9router && docker compose up -d 9router
+```
+
+Data persistence is the same named volume (`9router-data` at `/app/data` with
+`DATA_DIR=/app/data`); rebuilding the image never deletes it.
+
 ## Update to latest
 
 ```bash

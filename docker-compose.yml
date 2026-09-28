@@ -1,14 +1,21 @@
 services:
   9router:
-    image: decolua/9router:latest
-    container_name: 9router
+    # Built from this fork's master branch (auto/smart combo).
+    # Requires Compose with BuildKit git-context support.
+    build:
+      context: https://github.com/kalozfauzan1/9router-auto-combo.git#master
+    image: 9router-auto-combo:master
+    container_name: 9router-auto-combo
     restart: always
     ports:
       - "20128:20128"
     volumes:
       - 9router-data:/app/data
     env_file:
-      - .env
+      # Optional: create it first with `cp .env.example .env` and set
+      # JWT_SECRET / INITIAL_PASSWORD. Missing .env no longer aborts the deploy.
+      - path: .env
+        required: false
     environment:
       DATA_DIR: /app/data
       PORT: "20128"
