@@ -21,7 +21,6 @@ services:
       PORT: "20128"
       HOSTNAME: "0.0.0.0"
       NODE_ENV: production
-    depends_on:
 
 volumes:
   9router-data:
