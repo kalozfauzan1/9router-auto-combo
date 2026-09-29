@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,7 +26,11 @@ beforeAll(async () => {
 afterAll(() => {
   if (prevDataDir === undefined) delete process.env.DATA_DIR;
   else process.env.DATA_DIR = prevDataDir;
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  try {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  } catch {
+    // Windows file-lock flake on scratch cleanup (DB handle still open); ignore.
+  }
 });
 
 describe("auto/smart test DB isolation", () => {
@@ -177,5 +181,50 @@ describe("auto/smart persistence separation", () => {
     // Ranking key and runtime keys live apart: health must not leak into ranks.
     const ranksAfter = await repo.getModelRanks();
     expect(ranksAfter["test-provider/test-model"]).toBe(42);
+  });
+});
+
+describe("auto/smart kilo live catalog membership", () => {
+  const liveCatalog = {
+    data: [
+      { id: "cohere/north-mini-code:free", name: "North Mini Code" },
+      { id: "openai/text-embedding-3-large", name: "Embed" },
+    ],
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("lists live kilo models as score candidates under the connection alias", async () => {
+    const kilo = await import("../../open-sse/services/kilocodeModels.js");
+    kilo.clearKilocodeCatalogCache();
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => liveCatalog })));
+
+    await dbx.createProviderConnection({
+      provider: "kilocode",
+      authType: "oauth",
+      name: "kilo",
+      accessToken: "tok",
+      providerSpecificData: {},
+    });
+
+    const candidates = await svc.getAvailableAutoModels();
+    // Live-only model appears under the kc/ output alias …
+    expect(candidates).toContain("kc/cohere/north-mini-code:free");
+    // … non-chat catalog entries never enter the candidate list …
+    expect(candidates).not.toContain("kc/openai/text-embedding-3-large");
+    // … and the static fallback entries still list.
+    expect(candidates).toContain("kc/anthropic/claude-sonnet-4-20250514");
+  });
+
+  it("falls back to the static list when the live catalog is unreachable", async () => {
+    const kilo = await import("../../open-sse/services/kilocodeModels.js");
+    kilo.clearKilocodeCatalogCache();
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("down"); }));
+
+    const candidates = await svc.getAvailableAutoModels();
+    expect(candidates).toContain("kc/anthropic/claude-sonnet-4-20250514");
+    expect(candidates).not.toContain("kc/cohere/north-mini-code:free");
   });
 });

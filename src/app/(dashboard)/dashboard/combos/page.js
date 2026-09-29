@@ -1021,6 +1021,7 @@ function AutoComboSection() {
   const [loadError, setLoadError] = useState("");
   const [saveError, setSaveError] = useState("");
   const [reloadNonce, setReloadNonce] = useState(0);
+  const [filter, setFilter] = useState("");
 
   // Serializes GET/PUT: any newer request invalidates an in-flight one, so a late
   // refresh response can never clobber a newer saved score or the user's drafts.
@@ -1068,6 +1069,12 @@ function AutoComboSection() {
   // routing once saved. No optimistic write: the saved map is authoritative, so a
   // failed save leaves the server state and the visible rows untouched.
   const rows = buildRankRows(models, ranks);
+  // Live catalogs (e.g. Kilo's ~300 dynamic models) make the table long;
+  // a plain substring filter keeps a row findable without paging.
+  const needle = filter.trim().toLowerCase();
+  const visibleRows = needle
+    ? rows.filter(({ model }) => model.toLowerCase().includes(needle))
+    : rows;
   const busy = isRankEditorBusy({ saving, refreshing });
 
   const persist = async (next, model) => {
@@ -1144,7 +1151,15 @@ function AutoComboSection() {
           LKGP + circuit-breaker fallback; unscored models stay out of routing until saved.
         </p>
       </div>
-      <div className="mt-2 flex items-center justify-end">
+      <div className="mt-2 flex items-center justify-end gap-2">
+        <input
+          value={filter}
+          disabled={!loaded}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter models… (e.g. kc/)"
+          aria-label="Filter models"
+          className="w-44 rounded border border-border/50 bg-transparent px-2 py-1 text-xs outline-none disabled:opacity-50"
+        />
         <button
           type="button"
           disabled={busy || !loaded}
@@ -1165,9 +1180,18 @@ function AutoComboSection() {
       ) : (
         <div className="mt-1 flex flex-col gap-2">
           {saveError ? <p className="text-xs text-red-500">{saveError}</p> : null}
+          {needle && rows.length > 0 ? (
+            <p className="text-xs text-text-muted">
+              Showing {visibleRows.length} of {rows.length} models.
+            </p>
+          ) : null}
           {rows.length === 0 ? (
             <p className="text-xs text-text-muted italic">
               No eligible models. Add a provider connection or key, then refresh.
+            </p>
+          ) : visibleRows.length === 0 ? (
+            <p className="text-xs text-text-muted italic">
+              No models match “{filter.trim()}” ({rows.length} total).
             </p>
           ) : (
             <div className="overflow-hidden rounded-lg border border-border/50">
@@ -1180,7 +1204,7 @@ function AutoComboSection() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border/30 font-mono">
-                  {rows.map(({ model, rank }) => {
+                  {visibleRows.map(({ model, rank }) => {
                     const value = resolveScoreDraft(drafts[model], rank);
                     return (
                       <tr key={model}>

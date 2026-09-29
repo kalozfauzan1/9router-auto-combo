@@ -20,6 +20,7 @@ import {
 import { getProviderConnections, getCustomModels, getModelAliases } from "@/lib/db/index.js";
 import { getDisabledModels } from "@/lib/db/repos/disabledModelsRepo.js";
 import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS } from "open-sse/config/providerModels.js";
+import { resolveKilocodeModels } from "open-sse/services/kilocodeModels.js";
 import { FREE_PROVIDERS, getProviderAlias } from "@/shared/constants/providers.js";
 
 export { isAutoComboName, orderByRank, collectRankedAutoModels, classifyAutoError, getAutoCooldownMs, getModelState };
@@ -159,6 +160,38 @@ export async function getAvailableAutoModels({ liveModels = [] } = {}) {
     if (slash <= 0 || slash === key.length - 1) continue;
     if (!activeAliases.has(key.slice(0, slash))) continue;
     seen.set(key, true);
+  }
+
+  // Live Kilo gateway catalog (SWR-cached, fail-open): Kilo Code proxies the
+  // OpenRouter catalog, so dynamic models beyond the 8 static registry
+  // entries only become score candidates / routable members via this fetch.
+  // Served from cache after the first call, so the chat hot path never
+  // blocks; on failure the static list above still stands.
+  const kiloProviders = [...activeByProvider.entries()].filter(([providerId]) =>
+    providerId === "kilocode" || providerId === "kilo-gateway"
+  );
+  if (kiloProviders.length > 0) {
+    const live = await resolveKilocodeModels().catch(() => null);
+    if (live?.models?.length) {
+      for (const [providerId, conn] of kiloProviders) {
+        const staticAlias = PROVIDER_ID_TO_ALIAS[providerId] || providerId;
+        const outputAlias = (
+          conn?.providerSpecificData?.prefix
+          || getProviderAlias(providerId)
+          || staticAlias
+        ).trim();
+        if (!outputAlias) continue;
+        for (const m of live.models) {
+          let id = typeof m?.id === "string" ? m.id : "";
+          if (!id) continue;
+          if (id.startsWith(`${outputAlias}/`)) id = id.slice(outputAlias.length + 1);
+          else if (id.startsWith(`${staticAlias}/`)) id = id.slice(staticAlias.length + 1);
+          else if (id.startsWith(`${providerId}/`)) id = id.slice(providerId.length + 1);
+          if (!id) continue;
+          seen.set(`${outputAlias}/${id}`, true);
+        }
+      }
+    }
   }
 
   return [...seen.keys()];
