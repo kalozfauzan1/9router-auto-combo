@@ -335,11 +335,13 @@ describe("auto/smart lightweight recovery probe body", () => {
   it("preserves the Responses API input shape", () => {
     const arrayProbe = buildAutoProbeBody({ input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }], stream: true });
     expect(Array.isArray(arrayProbe.input)).toBe(true);
-    expect(arrayProbe.max_output_tokens).toBe(1);
+    // Console upstreams reject max_output_tokens < 16 — probe floors to 16.
+    expect(arrayProbe.max_output_tokens).toBe(16);
     expect(arrayProbe.messages).toBeUndefined();
 
     const stringProbe = buildAutoProbeBody({ input: "hi there", stream: true });
     expect(typeof stringProbe.input).toBe("string");
+    expect(stringProbe.max_output_tokens).toBe(16);
   });
 
   it("preserves the Gemini contents shape", () => {

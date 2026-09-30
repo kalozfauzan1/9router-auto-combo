@@ -3,6 +3,7 @@
  * Manual intelligence rank semantics: higher number = smarter.
  * Ranked models order highest rank first; unranked models sort last (stable).
  */
+import { MIN_RESPONSES_OUTPUT_TOKENS } from "../config/runtimeConfig.js";
 
 export const AUTO_COMBO_NAMES = new Set(["auto", "smart"]);
 
@@ -364,11 +365,11 @@ export function buildAutoProbeBody(body = {}) {
   }
 
   if (Array.isArray(src.input) || typeof src.input === "string") {
-    // OpenAI Responses API
+    // OpenAI Responses API — Console upstreams reject max_output_tokens < 16.
     out.input = Array.isArray(src.input)
       ? [{ role: "user", content: [{ type: "input_text", text: "ping" }] }]
       : "ping";
-    out.max_output_tokens = 1;
+    out.max_output_tokens = MIN_RESPONSES_OUTPUT_TOKENS;
     return out;
   }
 

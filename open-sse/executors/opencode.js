@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
-import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
+import { MEMORY_CONFIG, MIN_RESPONSES_OUTPUT_TOKENS } from "../config/runtimeConfig.js";
 import { getThinkingLevels } from "../providers/thinkingLevels.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
@@ -427,9 +427,13 @@ export class OpenCodeExecutor extends BaseExecutor {
       }
       // Responses API names the output cap max_output_tokens and takes thinking
       // as reasoning:{effort,summary} — normalize the Chat fields at this boundary.
+      // Console rejects max_output_tokens < 16, so floor small values.
       if (body.max_output_tokens === undefined) {
         if (body.max_completion_tokens !== undefined) body.max_output_tokens = body.max_completion_tokens;
         else if (body.max_tokens !== undefined) body.max_output_tokens = body.max_tokens;
+      }
+      if (Number.isFinite(body.max_output_tokens) && body.max_output_tokens < MIN_RESPONSES_OUTPUT_TOKENS) {
+        body.max_output_tokens = MIN_RESPONSES_OUTPUT_TOKENS;
       }
       delete body.max_tokens;
       delete body.max_completion_tokens;

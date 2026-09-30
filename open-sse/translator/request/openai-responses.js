@@ -13,6 +13,7 @@ import {
   coerceResponsesOutput,
 } from "../formats/responsesApi.js";
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM } from "../schema/index.js";
+import { MIN_RESPONSES_OUTPUT_TOKENS } from "../../config/runtimeConfig.js";
 
 const MAX_TOOL_NAME_LEN = 128;
 
@@ -326,6 +327,9 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
       if (out.max_completion_tokens !== undefined) out.max_output_tokens = out.max_completion_tokens;
       else if (out.max_tokens !== undefined) out.max_output_tokens = out.max_tokens;
     }
+    if (Number.isFinite(out.max_output_tokens) && out.max_output_tokens < MIN_RESPONSES_OUTPUT_TOKENS) {
+      out.max_output_tokens = MIN_RESPONSES_OUTPUT_TOKENS;
+    }
     delete out.max_tokens;
     delete out.max_completion_tokens;
     return out;
@@ -452,6 +456,9 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
     result.max_output_tokens = body.max_completion_tokens;
   } else if (body.max_tokens !== undefined) {
     result.max_output_tokens = body.max_tokens;
+  }
+  if (Number.isFinite(result.max_output_tokens) && result.max_output_tokens < MIN_RESPONSES_OUTPUT_TOKENS) {
+    result.max_output_tokens = MIN_RESPONSES_OUTPUT_TOKENS;
   }
   if (body.top_p !== undefined) result.top_p = body.top_p;
   if (body.reasoning !== undefined) result.reasoning = body.reasoning;

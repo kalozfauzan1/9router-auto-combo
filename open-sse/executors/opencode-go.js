@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { DefaultExecutor } from "./default.js";
+import { MIN_RESPONSES_OUTPUT_TOKENS } from "../config/runtimeConfig.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { getModelTargetFormat } from "../config/providerModels.js";
 import { FORMATS } from "../translator/formats.js";
@@ -164,9 +165,13 @@ export class OpenCodeGoExecutor extends DefaultExecutor {
       out.input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "..." }] }];
     }
     // Responses names the output cap max_output_tokens, not max_tokens.
+    // Console rejects max_output_tokens < 16, so floor small values.
     if (out.max_output_tokens === undefined) {
       if (out.max_completion_tokens !== undefined) out.max_output_tokens = out.max_completion_tokens;
       else if (out.max_tokens !== undefined) out.max_output_tokens = out.max_tokens;
+    }
+    if (Number.isFinite(out.max_output_tokens) && out.max_output_tokens < MIN_RESPONSES_OUTPUT_TOKENS) {
+      out.max_output_tokens = MIN_RESPONSES_OUTPUT_TOKENS;
     }
     delete out.max_tokens;
     delete out.max_completion_tokens;

@@ -65,6 +65,11 @@ export const GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS = envMs("GEMINI_NATIVE_TTS_FETCH
 export const DEFAULT_MAX_TOKENS = 64000;
 export const DEFAULT_MIN_TOKENS = 32000;
 
+// Console-backed Responses upstreams (opencode zen/go) reject
+// max_output_tokens < 16 with 400 invalid_request_error. Floor probes and
+// forwarded requests so a 1-token ping never 400s.
+export const MIN_RESPONSES_OUTPUT_TOKENS = 16;
+
 export const TOKEN_SAVER_HEADER = "x-9router-token-saver";
 
 // Retry config for 429 responses (legacy - kept for backward compatibility)
