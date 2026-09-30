@@ -24,7 +24,6 @@ function baseDeps(overrides = {}) {
     noteFailure: vi.fn(async () => {}),
     noteSuccess: vi.fn(async () => {}),
     noteLkgp: vi.fn(async () => {}),
-    disableModel: vi.fn(async () => {}),
     now: () => 1_700_000_000_000,
     ...overrides,
   };
@@ -61,9 +60,12 @@ describe("handleAutoComboChat transient fallback", () => {
 });
 
 describe("handleAutoComboChat auth/config errors", () => {
-  it("stops on 401, persists config-error state, returns the original error", async () => {
-    const first = errRes(401, "invalid api key");
-    const handleSingleModel = vi.fn(async () => first);
+  it("cools 401 for 5m and falls back instead of permanent disable", async () => {
+    const calls = [];
+    const handleSingleModel = vi.fn(async (body, model) => {
+      calls.push(model);
+      return model === "p/top" ? errRes(401, "invalid api key") : okRes(model);
+    });
     const deps = baseDeps();
     const out = await handleAutoComboChat({
       body: { messages: [] },
@@ -72,10 +74,12 @@ describe("handleAutoComboChat auth/config errors", () => {
       comboName: "auto",
       deps,
     });
-    expect(handleSingleModel).toHaveBeenCalledTimes(1);
-    expect(out).toBe(first);
-    expect(deps.disableModel.mock.calls).toEqual([["p/top"]]);
-    expect(deps.noteFailure).not.toHaveBeenCalled();
+    expect(calls).toEqual(["p/top", "p/low"]);
+    expect(out).toMatchObject({ ok: true, model: "p/low" });
+    expect(deps.noteFailure.mock.calls).toEqual([["p/top"]]);
+    expect(deps.noteSuccess.mock.calls).toEqual([["p/low"]]);
+    // No permanent auto-disable: disableModel dep no longer exists.
+    expect(deps.disableModel).toBeUndefined();
   });
 });
 
@@ -264,7 +268,7 @@ describe("handleAutoComboChat recovery probe", () => {
     expect(JSON.stringify(probe.body)).not.toContain("SECRET-PROMPT");
     expect(probe.body.tools).toBeUndefined();
     expect(probe.body.stream).toBe(false);
-    expect(probe.body.max_tokens).toBe(1);
+    expect(probe.body.max_tokens).toBe(16);
     expect(getProbeInFlight().size).toBe(0);
   });
 });

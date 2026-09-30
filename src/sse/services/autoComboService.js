@@ -226,8 +226,10 @@ export async function getAutoRankedModels(options = {}) {
 
 /**
  * Auto/Smart request path with LKGP + per-model circuit breaker.
- * Transient-only fallback; auth/config errors stop after persisting
- * config-error state (never fall back); open circuits are never retried.
+ * Every failure (transient or 401/403) cools the model for a fixed 5m, then one
+ * pool-wide probe retests; permanent auto-disable never happens — only manual
+ * UI disable via /api/models/disabled. Open circuits are never retried on the
+ * main path.
  *
  * State access is injectable via `deps` (defaults hit the real stores) so the
  * routing logic is testable without a database or upstream providers.
@@ -240,7 +242,6 @@ export async function handleAutoComboChat({ body, handleSingleModel, log, comboN
     noteFailure = (model) => bumpAutoModelFailure(model, Date.now()),
     noteSuccess = (model) => resetAutoModelFailure(model),
     noteLkgp = promoteAutoLkgp,
-    disableModel = disableAutoModel,
     buildProbeBody = buildAutoProbeBody,
     now = () => Date.now(),
   } = deps;
@@ -277,17 +278,10 @@ export async function handleAutoComboChat({ body, handleSingleModel, log, comboN
           await noteLkgp(probeModel).catch(() => {});
           log?.info?.("AUTO", `probe ${probeModel} ok → LKGP restored`);
         } else {
-          let text = "";
-          try {
-            const j = await res?.clone?.()?.json?.();
-            text = j?.error?.message || j?.error || "";
-          } catch { /* ignore */ }
-          const cls = classifyAutoError({ status: res?.status, errorText: text });
-          if (cls.action === "fallback") {
-            await noteFailure(probeModel).catch(() => {});
-          } else if (cls.action === "config-error") {
-            await disableModel(probeModel).catch(() => {});
-          }
+          // Any probe failure (incl. 401/403) just extends the fixed 5m cooldown.
+          // Never auto-disable: free upstreams often return transient 401/403.
+          await noteFailure(probeModel).catch(() => {});
+          log?.info?.("AUTO", `probe ${probeModel} failed → cooldown extended`, { status: res?.status });
         }
       })
       .catch(() => {})
@@ -311,12 +305,13 @@ export async function handleAutoComboChat({ body, handleSingleModel, log, comboN
       result = await handleSingleModel(body, model);
     } catch (e) {
       const cls = classifyAutoError({ status: 0, errorText: e?.message || String(e) });
-      if (cls.action !== "fallback") {
+      if (cls.action === "stop") {
         return new Response(
           JSON.stringify({ error: { message: e?.message || String(e) } }),
           { status: 502, headers: { "Content-Type": "application/json" } }
         );
       }
+      // Fallback + config-error (e.g. transient 401/403): cool 5m, try next.
       lastError = e?.message || String(e);
       lastStatus = 502;
       await noteFailure(model).catch(() => {});
@@ -339,20 +334,16 @@ export async function handleAutoComboChat({ body, handleSingleModel, log, comboN
     }
 
     const cls = classifyAutoError({ status: result?.status, errorText });
-    if (cls.action === "config-error") {
-      // Non-transient: persist disabled state, then stop with the original error.
-      log?.warn?.("AUTO", `Model ${model} config-error, disabling from retries`, { status: result?.status });
-      await disableModel(model).catch(() => {});
-      return result;
-    }
-    if (cls.action !== "fallback") {
+    if (cls.action === "stop") {
       return result;
     }
 
+    // Fallback + config-error (incl. 401/403): fixed 5m cooldown, try next model.
+    // Never persist disabled state from auto path — manual UI disable only.
     lastError = errorText || String(result?.status);
     lastStatus = result?.status || 503;
     await noteFailure(model).catch(() => {});
-    log?.warn?.("AUTO", `Model ${model} failed, trying next`, { status: result?.status });
+    log?.warn?.("AUTO", `Model ${model} failed (${cls.action}), cooling 5m, trying next`, { status: result?.status });
   }
 
   return new Response(
@@ -361,10 +352,8 @@ export async function handleAutoComboChat({ body, handleSingleModel, log, comboN
   );
 }
 
-async function disableAutoModel(model) {
-  const { disableModels } = await import("@/lib/db/repos/disabledModelsRepo.js");
-  const slash = model.indexOf("/");
-  if (slash > 0) {
-    await disableModels(model.slice(0, slash), [model.slice(slash + 1)]).catch(() => {});
-  }
+// Deprecated: auto path never disables anymore (fixed 5m cooldown + probe).
+// Kept for backward compat; manual UI disable via /api/models/disabled only.
+async function disableAutoModel() {
+  return null;
 }

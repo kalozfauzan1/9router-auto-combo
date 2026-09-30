@@ -85,9 +85,9 @@ export async function clearAutoHealth() {
 }
 
 /**
- * Atomically increment a model's consecutive-failure count and recompute its
- * cooldown from the ladder. Read-modify-write runs inside one synchronous DB
- * transaction, so concurrent failure reports cannot collapse into one.
+ * Increment a model's consecutive-failure count and set a fixed 5m cooldown.
+ * Read-modify-write runs inside one synchronous DB transaction, so concurrent
+ * failure reports cannot collapse into one.
  */
 export async function bumpAutoModelFailure(model, nowMs = Date.now()) {
   if (typeof model !== "string" || !model.includes("/")) return await getAutoHealth();

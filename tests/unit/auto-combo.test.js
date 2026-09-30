@@ -165,14 +165,12 @@ describe("auto/smart transient-only fallback classification", () => {
   });
 });
 
-describe("auto/smart exponential cooldown ladder", () => {
-  it("uses 1m, 5m, 15m, 30m, max 60m", () => {
-    expect(getAutoCooldownMs(1)).toBe(60_000);
+describe("auto/smart fixed 5m cooldown", () => {
+  it("always cools 5m regardless of failure count", () => {
+    expect(getAutoCooldownMs(1)).toBe(300_000);
     expect(getAutoCooldownMs(2)).toBe(300_000);
-    expect(getAutoCooldownMs(3)).toBe(900_000);
-    expect(getAutoCooldownMs(4)).toBe(1_800_000);
-    expect(getAutoCooldownMs(5)).toBe(3_600_000);
-    expect(getAutoCooldownMs(9)).toBe(3_600_000);
+    expect(getAutoCooldownMs(9)).toBe(300_000);
+    expect(getAutoCooldownMs()).toBe(300_000);
   });
 });
 
@@ -228,7 +226,7 @@ describe("auto/smart circuit breaker LKGP", () => {
     const now = Date.now();
     const failed = recordAutoFailure("c/model-3", {}, now);
     expect(failed["c/model-3"].failures).toBe(1);
-    expect(failed["c/model-3"].cooldownUntil).toBe(now + 60_000);
+    expect(failed["c/model-3"].cooldownUntil).toBe(now + 300_000);
     const reset = recordAutoSuccess("c/model-3", failed);
     expect(reset["c/model-3"].failures).toBe(0);
   });
@@ -313,10 +311,10 @@ describe("auto/smart lightweight recovery probe body", () => {
     expect(probe.system).toBeUndefined();
   });
 
-  it("stays minimal: non-streaming, tiny token budget, one ping message", () => {
+  it("stays minimal: non-streaming, floored token budget, one ping message", () => {
     const probe = buildAutoProbeBody(sensitive);
     expect(probe.stream).toBe(false);
-    expect(probe.max_tokens).toBe(1);
+    expect(probe.max_tokens).toBe(16);
     expect(probe.messages).toHaveLength(1);
     expect(probe.messages[0].role).toBe("user");
     expect(String(probe.messages[0].content)).toContain("ping");
@@ -329,7 +327,7 @@ describe("auto/smart lightweight recovery probe body", () => {
     });
     expect(Array.isArray(probe.messages[0].content)).toBe(true);
     expect(probe.messages[0].content[0]).toMatchObject({ type: "text" });
-    expect(probe.max_tokens).toBe(1);
+    expect(probe.max_tokens).toBe(16);
   });
 
   it("preserves the Responses API input shape", () => {
@@ -352,13 +350,13 @@ describe("auto/smart lightweight recovery probe body", () => {
 
   it("bounds Gemini and Antigravity output tokens via generationConfig", () => {
     const gemini = buildAutoProbeBody({ contents: [{ role: "user", parts: [{ text: "hi" }] }] });
-    expect(gemini.generationConfig?.maxOutputTokens).toBe(1);
+    expect(gemini.generationConfig?.maxOutputTokens).toBe(16);
 
     const antigravity = buildAutoProbeBody({
       request: { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
       userAgent: "antigravity",
     });
-    expect(antigravity.request?.generationConfig?.maxOutputTokens).toBe(1);
+    expect(antigravity.request?.generationConfig?.maxOutputTokens).toBe(16);
   });
 });
 

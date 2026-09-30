@@ -142,14 +142,12 @@ export function isRankEditorBusy({ saving = false, refreshing = false } = {}) {
   return Boolean(saving || refreshing);
 }
 
-// Exponential cooldown ladder: 1m, 5m, 15m, 30m, max 60m.
-const AUTO_COOLDOWNS_MS = [60_000, 300_000, 900_000, 1_800_000, 3_600_000];
+// Fixed auto cooldown: every failure cools 5m, then one pool-wide probe retests.
+// No ladder: request N+1 skips failed model directly, probe decides recovery.
+const AUTO_COOLDOWN_MS = 5 * 60 * 1000;
 
-export function getAutoCooldownMs(consecutiveFailures) {
-  const n = Number(consecutiveFailures);
-  if (!Number.isFinite(n) || n <= 1) return AUTO_COOLDOWNS_MS[0];
-  const idx = Math.min(Math.floor(n) - 1, AUTO_COOLDOWNS_MS.length - 1);
-  return AUTO_COOLDOWNS_MS[idx];
+export function getAutoCooldownMs() {
+  return AUTO_COOLDOWN_MS;
 }
 
 const TRANSIENT_TEXT_HINTS = [
@@ -195,7 +193,7 @@ const NON_FALLBACK_TEXT_HINTS = [
 
 /**
  * Classify an auto/smart failure.
- * - config-error: 401/403 auth/config problems (disable from retries, no fallback)
+ * - config-error: 401/403 auth/config problems (caller cools down 5m + probes, never disables)
  * - fallback: transient 429/quota/timeout/network/5xx/model-unavailable
  * - stop: invalid request, moderation, context errors and other 4xx
  */
@@ -338,7 +336,8 @@ export function shouldPromoteLkgp(ranks, candidate, current) {
 /**
  * Build a minimal, source-format-compatible recovery probe body.
  * Never resends the user prompt/tools/system: emits a single tiny "ping" and a
- * minimal token budget so a probe cannot leak sensitive context or cost much.
+ * floored token budget (>=16) so a probe cannot leak sensitive context, cost much,
+ * or 400 on strict upstreams (Console rejects max_output_tokens < 16).
  * The conversation key/shape of the original request is preserved so the
  * translator pipeline still detects the same source format (openai/claude/
  * openai-responses/gemini/antigravity).
@@ -348,9 +347,9 @@ export function buildAutoProbeBody(body = {}) {
   const out = { stream: false };
 
   if (Array.isArray(src.contents)) {
-    // Gemini
+    // Gemini — keep >=16 so tiny pings never 400 on strict upstreams.
     out.contents = [{ role: "user", parts: [{ text: "ping" }] }];
-    out.generationConfig = { maxOutputTokens: 1 };
+    out.generationConfig = { maxOutputTokens: MIN_RESPONSES_OUTPUT_TOKENS };
     return out;
   }
 
@@ -358,7 +357,7 @@ export function buildAutoProbeBody(body = {}) {
     // Antigravity (Gemini wrapped in request), userAgent drives detection
     out.request = {
       contents: [{ role: "user", parts: [{ text: "ping" }] }],
-      generationConfig: { maxOutputTokens: 1 },
+      generationConfig: { maxOutputTokens: MIN_RESPONSES_OUTPUT_TOKENS },
     };
     if (typeof src.userAgent === "string") out.userAgent = src.userAgent;
     return out;
@@ -378,15 +377,15 @@ export function buildAutoProbeBody(body = {}) {
     : undefined;
 
   if (Array.isArray(firstContent)) {
-    // Claude: content is an array of typed blocks
+    // Claude: content is an array of typed blocks — floor >=16 (was 1, 400s on strict upstreams).
     out.messages = [{ role: "user", content: [{ type: "text", text: "ping" }] }];
-    out.max_tokens = 1;
+    out.max_tokens = MIN_RESPONSES_OUTPUT_TOKENS;
     return out;
   }
 
-  // OpenAI / default
+  // OpenAI / default — floor >=16 (was 1, 400s on strict upstreams).
   out.messages = [{ role: "user", content: "ping" }];
-  out.max_tokens = 1;
+  out.max_tokens = MIN_RESPONSES_OUTPUT_TOKENS;
   return out;
 }
 
