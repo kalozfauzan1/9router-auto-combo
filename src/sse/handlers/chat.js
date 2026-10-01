@@ -17,6 +17,8 @@ import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { upstreamResponseHeaders } from "open-sse/utils/upstreamHeaders.js";
 import { handleComboChat, handleFusionChat, detectRequiredCapabilities } from "open-sse/services/combo.js";
+import { isAutoComboName } from "open-sse/services/autoCombo.js";
+import { handleAutoComboChat } from "../services/autoComboService.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
@@ -95,6 +97,23 @@ export async function handleChat(request, clientRawRequest = null) {
 
   // Check if model is a combo (has multiple models with fallback)
   const comboModels = await getComboModels(modelStr);
+  // Default virtual combo auto/smart uses LKGP + circuit breaker routing.
+  // A DB combo named auto/smart keeps precedence; otherwise the virtual pool
+  // routes here even when empty to return the actionable "assign ranks" 503
+  // instead of an invalid-model 400.
+  if (isAutoComboName(modelStr)) {
+    const { getComboByName } = await import("@/lib/localDb");
+    const existing = await getComboByName(modelStr).catch(() => null);
+    if (!existing || !existing.models || existing.models.length === 0) {
+      log.info("CHAT", `Virtual combo "${modelStr}" (auto/smart ranked pool)`);
+      return handleAutoComboChat({
+        body,
+        handleSingleModel: (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        log,
+        comboName: modelStr,
+      });
+    }
+  }
   if (comboModels) {
     // Check for combo-specific strategy first, fallback to global
     const comboStrategies = settings.comboStrategies || {};
@@ -169,6 +188,19 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
   // If provider is null, this might be a combo name - check and handle
   if (!modelInfo.provider) {
+    if (isAutoComboName(modelStr)) {
+      // A DB combo literally named auto/smart keeps precedence here too.
+      const { getComboByName } = await import("@/lib/localDb");
+      const existing = await getComboByName(modelStr).catch(() => null);
+      if (!existing || !existing.models || existing.models.length === 0) {
+        return handleAutoComboChat({
+          body,
+          handleSingleModel: (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+          log,
+          comboName: modelStr,
+        });
+      }
+    }
     const comboModels = await getComboModels(modelStr);
     if (comboModels) {
       const chatSettings = await getSettings();

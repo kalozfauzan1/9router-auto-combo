@@ -15,6 +15,7 @@ import { resolveCopilotModels } from "open-sse/services/copilotModels.js";
 import { resolveClinepassModels, resolveClineModels } from "open-sse/services/clinepassModels.js";
 import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
+import { resolveKilocodeModels } from "open-sse/services/kilocodeModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
@@ -55,6 +56,24 @@ function comboSeatCapabilities(seat) {
   if (slash <= 0) return null;
   const alias = seat.slice(0, slash);
   return getCapabilitiesForModel(ALIAS_TO_PROVIDER_ID[alias] || alias, seat.slice(slash + 1));
+}
+
+// Live Kilo gateway catalog merged over a provider's curated static entries.
+// The gateway (OpenRouter-shaped) catalog carries different ids than the
+// kilo-curated static list, and both route via passthrough — so advertise the
+// union instead of replacing, and never regress the static entries.
+async function resolveKiloLiveModels(staticAlias) {
+  const result = await resolveKilocodeModels();
+  if (!result?.models?.length) return null;
+  const seen = new Set(result.models.map((m) => m.id));
+  const models = [...result.models];
+  for (const m of PROVIDER_MODELS[staticAlias] || []) {
+    if (m?.id && !seen.has(m.id)) {
+      seen.add(m.id);
+      models.push({ id: m.id, name: m.name || m.id });
+    }
+  }
+  return { models };
 }
 
 // Per-provider live model resolvers. Each receives a connection record and
@@ -156,6 +175,10 @@ const LIVE_MODEL_RESOLVERS = {
         })),
     };
   },
+  // Kilo proxies the OpenRouter catalog: prefer the live gateway list but keep
+  // the curated static entries (fail-open keeps the static list when live fails).
+  kilocode: async () => resolveKiloLiveModels("kc"),
+  "kilo-gateway": async () => resolveKiloLiveModels("kgw"),
 };
 
 const parseOpenAIStyleModels = (data) => {
@@ -395,6 +418,17 @@ export async function buildModelsList(kindFilter, options = {}) {
       if (Number.isFinite(maxOutput)) entry.max_completion_tokens = maxOutput;
     }
     models.push(entry);
+  }
+
+  // Default virtual combos auto/smart: advertised when no DB combo claims the
+  // name, so clients can select them without manual combo setup.
+  if (kindFilter.includes(LLM_KIND)) {
+    const comboNames = new Set(combos.map((c) => c.name));
+    for (const virtual of ["auto", "smart"]) {
+      if (!comboNames.has(virtual)) {
+        models.push({ id: virtual, object: "model", owned_by: "auto" });
+      }
+    }
   }
 
   if (connections.length === 0) {
