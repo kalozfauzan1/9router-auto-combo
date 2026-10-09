@@ -349,8 +349,12 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
       // DeepSeek: low/medium→high, xhigh/max→max. Some backends (mimo v2.5-pro/v2.6
       // on opencode-go, probed live) 400 on "max" — clamp to high when the declared
       // levels exclude it.
+      // xhigh is advertised by the model's own level list (e.g. mimo-v2.6) and the
+      // Zen upstream accepts it (live probe: HTTP 200), so pass it through instead
+      // of routing it through the max clamp which used to downgrade it to high.
       const level = toLevel(eff);
-      const want = level === "xhigh" || level === "max" ? "max" : "high";
+      const passthrough = level === "xhigh" && supportedLevels?.includes("xhigh");
+      const want = passthrough ? "xhigh" : (level === "xhigh" || level === "max" ? "max" : "high");
       body.reasoning_effort = want === "max" && supportedLevels && !supportedLevels.includes("max") ? "high" : want;
       break;
     }
