@@ -136,13 +136,29 @@ describe("OpenCode Free Executor Session Resolution", () => {
     expect(Math.abs(sessionTimestamp - nowModulo)).toBeLessThan(60_000);
   });
 
-  it("translates conversation session deterministically", () => {
+  it("uses a generated timestamp-valid session for generic provider hints", () => {
+    const executor = getExecutor("opencode");
+    const session = prepare(executor, { providerSessionId: "conversation-a", clientTool: "claude" }).prepared._opencodeSession;
+
+    expect(session).toMatch(OPENCODE_SESSION_RE);
+    const encodedTime = BigInt(`0x${session.slice(4, 16)}`);
+    const sessionTimestamp = Number(((~encodedTime) & ((1n << 48n) - 1n)) >> 12n);
+    const nowModulo = Date.now() % 2 ** 36;
+    expect(Math.abs(sessionTimestamp - nowModulo)).toBeLessThan(60_000);
+  });
+
+  it("keeps the same generic provider hint stable", () => {
     const executor = getExecutor("opencode");
     const first = prepare(executor, { providerSessionId: "conversation-a", clientTool: "claude" }).prepared._opencodeSession;
     const second = prepare(executor, { providerSessionId: "conversation-a", clientTool: "claude" }).prepared._opencodeSession;
 
     expect(first).toBe(second);
-    expect(first).toMatch(OPENCODE_SESSION_RE);
+  });
+
+  it("preserves a valid canonical provider session", () => {
+    const executor = getExecutor("opencode");
+    const valid = "ses_f534dfae8ffeCy4Ee4tLWNygDc";
+    expect(prepare(executor, { providerSessionId: valid }).prepared._opencodeSession).toBe(valid);
   });
 
   it("isolates different conversations and tools", () => {

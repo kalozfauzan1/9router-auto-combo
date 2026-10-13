@@ -143,8 +143,13 @@ function identityKey(credentials) {
   return "opencode:default";
 }
 
-export function stableSessionId(credentials) {
-  const key = identityKey(credentials);
+export function stableSessionId(credentials, hint = "", clientTool = "") {
+  const identity = identityKey(credentials);
+  const normalizedHint = normalizeSession(hint);
+  const affinity = normalizedHint
+    ? crypto.createHash("sha256").update(`opencode\0${clientTool || "generic"}\0${normalizedHint}`).digest("hex").slice(0, 32)
+    : "default";
+  const key = `${identity}:hint:${affinity}`;
   const existing = stableOpencodeSessions.get(key);
   if (existing) {
     existing.lastUsed = Date.now();
@@ -275,7 +280,7 @@ function resolveOpencodeSession(body, credentials, providerSessionId, clientTool
   }
 
   const hinted = incoming || normalizeSession(providerSessionId);
-  if (hinted) return translateSessionId(hinted, clientTool);
+  if (hinted && OPENCODE_SESSION_RE.test(hinted)) return hinted;
 
   if (credentials?.connectionId || bodyHasSessionHints(body)) {
     let viaManager = null;
@@ -290,10 +295,10 @@ function resolveOpencodeSession(body, credentials, providerSessionId, clientTool
       viaManager = null;
     }
     if (viaManager && OPENCODE_SESSION_RE.test(viaManager.trim())) return viaManager.trim();
-    if (viaManager) return stableSessionId(credentials);
+    if (viaManager) return stableSessionId(credentials, hinted || "", clientTool);
   }
 
-  return stableSessionId(credentials);
+  return stableSessionId(credentials, hinted, clientTool);
 }
 
 function resolveOpencodeRequestId(body, credentials, sessionId) {
