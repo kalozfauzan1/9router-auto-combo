@@ -289,7 +289,8 @@ function resolveOpencodeSession(body, credentials, providerSessionId, clientTool
     } catch {
       viaManager = null;
     }
-    if (viaManager) return translateSessionId(viaManager, clientTool);
+    if (viaManager && OPENCODE_SESSION_RE.test(viaManager.trim())) return viaManager.trim();
+    if (viaManager) return stableSessionId(credentials);
   }
 
   return stableSessionId(credentials);

@@ -117,6 +117,25 @@ describe("OpenCode Free Executor Session Resolution", () => {
     expect(prepared._opencodeSession).not.toBe("invalid-session-uuid");
   });
 
+  it("uses a stable canonical session when the manager returns a non-native session", () => {
+    const executor = getExecutor("opencode");
+    const credentials = makeCredentials({ connectionId: "manager-session-test" });
+    const body = { messages: [{ role: "assistant", content: "previous response with enough text to trigger manager resolution" }, { role: "user", content: "hello" }] };
+    const prepared = executor.prepareRequestCredentials({
+      body,
+      credentials,
+      providerSessionId: null,
+      clientTool: "claude",
+    });
+
+    expect(prepared._opencodeSession).toBe(stableSessionId(credentials));
+    expect(prepared._opencodeSession).toMatch(OPENCODE_SESSION_RE);
+    const encodedTime = BigInt(`0x${prepared._opencodeSession.slice(4, 16)}`);
+    const sessionTimestamp = Number(((~encodedTime) & ((1n << 48n) - 1n)) >> 12n);
+    const nowModulo = Date.now() % 2 ** 36;
+    expect(Math.abs(sessionTimestamp - nowModulo)).toBeLessThan(60_000);
+  });
+
   it("translates conversation session deterministically", () => {
     const executor = getExecutor("opencode");
     const first = prepare(executor, { providerSessionId: "conversation-a", clientTool: "claude" }).prepared._opencodeSession;
