@@ -3,8 +3,9 @@ services:
     # Built from this fork's master branch (auto/smart combo).
     # Requires Compose with BuildKit git-context support.
     build:
-      context: https://github.com/kalozfauzan1/9router-auto-combo.git#master
-    image: 9router-auto-combo:master
+      # Build the branch checked out by Dokploy, not a hard-coded master context.
+      context: .
+    image: 9router-auto-combo:branch
     container_name: 9router-auto-combo
     restart: always
     ports:
