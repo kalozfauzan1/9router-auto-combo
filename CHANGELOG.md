@@ -1,5 +1,9 @@
 # Unreleased
 
+## Fixes
+- **Auth / Proxy**: support proxy pool fallback and pool exclusion for no-auth free providers (`FREE_PROVIDERS`); mark `proxy:*` virtual connections unavailable on fallbackable HTTP errors (403/429/5xx) so rotating pools seamlessly fail over to working relays
+- **OpenCode**: match `deepseek-v4.1-flash-free` in `OPENCODE_FAMILIES` regex and add `deepseek-v4.1-flash-free` to OpenCode registry models with `[openai, claude, openai-responses]` supported formats
+
 ## Features
 - **Combos**: default virtual `auto`/`smart` combo with manual intelligence ranking (higher number = smarter), LKGP + per-model circuit breaker (healthy/cooldown/probing, 1m/5m/15m/30m/max 60m), transient-only fallback, and `GET`/`PUT /api/models/ranks` plus combos-page ranking UI
 - **Combos (auto/smart)**: the rank list now auto-populates with every eligible registered model — active provider connections/keys plus active no-auth free providers — so scores are entered inline per row (no free-text model selector). Scored rows sort highest-first with deterministic provider/model ties; unscored eligible rows sit below with a blank score and never enter routing until a valid score is saved; a Refresh control re-reads eligibility from the guarded endpoint.
