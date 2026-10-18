@@ -90,6 +90,31 @@ export async function updateProxyPool(id, data) {
   return result;
 }
 
+/**
+ * Write a single JSON `data` field on a proxy pool without touching generic
+ * columns (isActive/testStatus), `updatedAt`, or any column ordering that
+ * routing reads. Advisory diagnostics only — callers must treat null as
+ * "not stored" and never let a failure change request behavior.
+ */
+export async function updateProxyPoolDataField(id, key, value) {
+  const db = await getAdapter();
+  let result = null;
+  db.transaction(() => {
+    const row = db.get(`SELECT * FROM proxyPools WHERE id = ?`, [id]);
+    if (!row) return;
+    const merged = rowToPool(row);
+    if (value === null || value === undefined) delete merged[key];
+    else merged[key] = value;
+    const r = poolToRow(merged);
+    db.run(
+      `UPDATE proxyPools SET isActive = ?, testStatus = ?, data = ?, createdAt = ?, updatedAt = ? WHERE id = ?`,
+      [r.isActive, r.testStatus, r.data, r.createdAt, r.updatedAt, id]
+    );
+    result = merged;
+  });
+  return result;
+}
+
 export async function deleteProxyPool(id) {
   const db = await getAdapter();
   let removed = null;

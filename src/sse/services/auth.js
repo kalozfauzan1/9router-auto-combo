@@ -1,5 +1,6 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
+import { recordOpencodeRelayFailure, clearOpencodeRelayWarning } from "@/lib/network/opencodeRelayDiagnostics.js";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
@@ -261,6 +262,12 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
   if (connectionId.startsWith("proxy:")) {
     const { shouldFallback, cooldownMs } = checkFallbackError(status, errorText, 0, provider);
+    // Advisory OpenCode relay diagnostic (fail-open, never affects the result below).
+    if (shouldFallback) {
+      try {
+        await recordOpencodeRelayFailure({ connectionId, status, errorText, provider, model });
+      } catch { /* diagnostic only */ }
+    }
     return { shouldFallback, cooldownMs };
   }
   const connections = await getProviderConnections({ provider });
@@ -319,9 +326,17 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
  * @param {string} connectionId
  * @param {object} currentConnection - credentials object (has _connection) or raw connection
  * @param {string|null} model - model that succeeded
+ * @param {string|null} provider - provider that succeeded; required to clear OpenCode relay warnings
  */
-export async function clearAccountError(connectionId, currentConnection, model = null) {
+export async function clearAccountError(connectionId, currentConnection, model = null, provider = null) {
   if (!connectionId || connectionId === "noauth") return;
+  if (connectionId.startsWith("proxy:")) {
+    // OpenCode relay warning: a real success through the same pool clears the
+    // active warning but keeps the last incident. Fail-open, advisory only.
+    try {
+      await clearOpencodeRelayWarning({ connectionId, provider });
+    } catch { /* diagnostic only */ }
+  }
   const conn = currentConnection._connection || currentConnection;
   const now = Date.now();
   const allLockKeys = Object.keys(conn).filter(k => k.startsWith("modelLock_"));

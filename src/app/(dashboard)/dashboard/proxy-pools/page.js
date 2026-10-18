@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Badge, Button, Card, CardSkeleton, Input, Modal, Toggle, ConfirmModal } from "@/shared/components";
 import { useNotificationStore } from "@/store/notificationStore";
+import RelayDiagnostic from "./RelayDiagnostic";
 
 function getStatusVariant(status) {
   if (status === "active") return "success";
@@ -84,6 +85,11 @@ export default function ProxyPoolsPage() {
 
   useEffect(() => {
     fetchProxyPools();
+    const intervalId = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      fetchProxyPools();
+    }, 30000);
+    return () => clearInterval(intervalId);
   }, [fetchProxyPools]);
 
   const resetForm = () => {
@@ -787,6 +793,7 @@ export default function ProxyPoolsPage() {
                     Last tested: {formatDateTime(pool.lastTestedAt)}
                     {pool.lastError ? ` · ${pool.lastError}` : ""}
                   </p>
+                  <RelayDiagnostic diagnostic={pool.opencodeRelayDiagnostic} />
                   </div>
                 </div>
 
