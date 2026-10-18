@@ -3,6 +3,7 @@
 ## Fixes
 - **Auth / Proxy**: support proxy pool fallback and pool exclusion for no-auth free providers (`FREE_PROVIDERS`); mark `proxy:*` virtual connections unavailable on fallbackable HTTP errors (403/429/5xx) so rotating pools seamlessly fail over to working relays
 - **OpenCode**: match `deepseek-v4.1-flash-free` in `OPENCODE_FAMILIES` regex and add `deepseek-v4.1-flash-free` to OpenCode registry models with `[openai, claude, openai-responses]` supported formats
+- **OpenCode**: use OpenAI `reasoning_effort` for `glm-5.3-flash-free` on the free lanes — the upstream rejects the zai `thinking` object (#5003)
 
 ## Features
 - **Combos**: default virtual `auto`/`smart` combo with manual intelligence ranking (higher number = smarter), LKGP + per-model circuit breaker (healthy/cooldown/probing, 1m/5m/15m/30m/max 60m), transient-only fallback, and `GET`/`PUT /api/models/ranks` plus combos-page ranking UI
