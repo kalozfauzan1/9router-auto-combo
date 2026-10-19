@@ -113,8 +113,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const stripList = getModelStrip(alias, model);
   const upstreamModel = getModelUpstreamId(alias, model);
 
-  // Inject provider-level thinking default (client-explicit thinking always wins)
+  // Inject provider-level thinking default. A provider floor may raise explicit
+  // client intent; when it replaces the body, strip the model suffix so
+  // applyThinking cannot override the raised floor with the weaker intent.
+  const previousBody = body;
   body = applyProviderThinking(body, providerThinking, provider, model);
+  const floorChanged = body !== previousBody;
+  const thinkingModel = floorChanged ? stripThinkingSuffix(upstreamModel) : upstreamModel;
 
   // Per-request opt-out: client can bypass all token savers via header
   const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
@@ -188,8 +193,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     log?.debug?.("PASSTHROUGH", `${clientTool} → ${provider} | native lossless`);
     translatedBody = { ...body, model: stripThinkingSuffix(upstreamModel) };
     if (provider === "codex") {
-      const suffixThinking = {};
-      applyThinking(sourceFormat, upstreamModel, suffixThinking, provider);
+      // Seed with the outbound body so a provider floor is not discarded:
+      // applyThinking can only raise intent, never lower it.
+      const suffixThinking = { ...translatedBody };
+      applyThinking(sourceFormat, thinkingModel, suffixThinking, provider);
       if (suffixThinking.reasoning_effort) {
         const reasoning = translatedBody.reasoning;
         translatedBody.reasoning = {
@@ -198,11 +205,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         };
         delete translatedBody.reasoning_effort;
       }
+    } else if (floorChanged) {
+      // A provider floor wrote a generic body-level effort; normalize it to the
+      // native field this passthrough format expects. No-floor requests stay lossless.
+      applyThinking(sourceFormat, thinkingModel, translatedBody, provider);
     }
     // Normalize newer Cowork/CC beta shapes (adaptive thinking, mid-conversation system) the API rejects
     if (clientTool === "claude") normalizeClaudePassthrough(translatedBody, translatedBody.model);
   } else {
-    translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
+    translatedBody = translateRequest(sourceFormat, targetFormat, thinkingModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
     if (!translatedBody) {
       trackPendingRequest(model, provider, connectionId, false, true);
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Failed to translate request for ${sourceFormat} → ${targetFormat}`);
