@@ -35,7 +35,7 @@ vi.mock("../../open-sse/handlers/chatCore/sseToJsonHandler.js", () => ({
 
 const { handleChatCore } = await import("../../open-sse/handlers/chatCore.js");
 
-async function runNativeCodexRequest(model, reasoning) {
+async function runNativeCodexRequest(model, reasoning, providerThinking) {
   const body = {
     model,
     input: "hello",
@@ -45,6 +45,7 @@ async function runNativeCodexRequest(model, reasoning) {
 
   await handleChatCore({
     body,
+    ...(providerThinking ? { providerThinking } : {}),
     modelInfo: { provider: "codex", model },
     credentials: { accessToken: "test-token", providerSpecificData: {} },
     log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
@@ -106,6 +107,29 @@ describe("native Codex passthrough thinking suffixes", () => {
     });
 
     expect(body.model).toBe("gpt-5.6-terra");
+    expect(body.reasoning).toEqual({ effort: "ultra" });
+  });
+
+  it("applies provider thinking mode over request reasoning for Sol", async () => {
+    const body = await runNativeCodexRequest(
+      "gpt-5.6-sol(low)",
+      { effort: "low", summary: "detailed" },
+      { mode: "high" },
+    );
+
+    expect(body.model).toBe("gpt-5.6-sol");
+    expect(body.reasoning).toEqual({ effort: "high", summary: "detailed" });
+    expect(body).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("keeps Sol Ultra reasoning when provider thinking mode is lower", async () => {
+    const body = await runNativeCodexRequest(
+      "gpt-5.6-sol(ultra)",
+      { effort: "low" },
+      { mode: "high" },
+    );
+
+    expect(body.model).toBe("gpt-5.6-sol");
     expect(body.reasoning).toEqual({ effort: "ultra" });
   });
 });

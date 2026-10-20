@@ -30,6 +30,7 @@ import { compressWithPxpipe } from "../rtk/pxpipe.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
+import { applyProviderThinking } from "../translator/concerns/providerThinking.js";
 import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translator/concerns/toolCall.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 
@@ -112,19 +113,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const stripList = getModelStrip(alias, model);
   const upstreamModel = getModelUpstreamId(alias, model);
 
-  // Inject provider-level thinking config override (only if client hasn't set)
-  // on/off → extended type (body.thinking), none/low/medium/high → effort type (body.reasoning_effort)
-  if (providerThinking?.mode && providerThinking.mode !== "auto") {
-    const mode = providerThinking.mode;
-    if (mode === "on" && !body.thinking) {
-      console.log("Injecting provider-level thinking config override: on");
-      body = { ...body, thinking: { type: "enabled", budget_tokens: 10000 } };
-    } else if (mode === "off" && !body.thinking) {
-      body = { ...body, thinking: { type: "disabled" } };
-    } else if (!body.reasoning_effort) {
-      body = { ...body, reasoning_effort: mode };
-    }
-  }
+  // Inject provider-level thinking default. A provider floor may raise explicit
+  // client intent; when it replaces the body, strip the model suffix so
+  // applyThinking cannot override the raised floor with the weaker intent.
+  const previousBody = body;
+  body = applyProviderThinking(body, providerThinking, provider, model);
+  const floorChanged = body !== previousBody;
+  const thinkingModel = floorChanged ? stripThinkingSuffix(upstreamModel) : upstreamModel;
 
   // Per-request opt-out: client can bypass all token savers via header
   const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
@@ -198,8 +193,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     log?.debug?.("PASSTHROUGH", `${clientTool} → ${provider} | native lossless`);
     translatedBody = { ...body, model: stripThinkingSuffix(upstreamModel) };
     if (provider === "codex") {
-      const suffixThinking = {};
-      applyThinking(sourceFormat, upstreamModel, suffixThinking, provider);
+      // Seed with the outbound body so a provider floor is not discarded:
+      // applyThinking can only raise intent, never lower it.
+      const suffixThinking = { ...translatedBody };
+      applyThinking(sourceFormat, thinkingModel, suffixThinking, provider);
       if (suffixThinking.reasoning_effort) {
         const reasoning = translatedBody.reasoning;
         translatedBody.reasoning = {
@@ -208,11 +205,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         };
         delete translatedBody.reasoning_effort;
       }
+    } else if (floorChanged) {
+      // A provider floor wrote a generic body-level effort; normalize it to the
+      // native field this passthrough format expects. No-floor requests stay lossless.
+      applyThinking(sourceFormat, thinkingModel, translatedBody, provider);
     }
     // Normalize newer Cowork/CC beta shapes (adaptive thinking, mid-conversation system) the API rejects
     if (clientTool === "claude") normalizeClaudePassthrough(translatedBody, translatedBody.model);
   } else {
-    translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
+    translatedBody = translateRequest(sourceFormat, targetFormat, thinkingModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
     if (!translatedBody) {
       trackPendingRequest(model, provider, connectionId, false, true);
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Failed to translate request for ${sourceFormat} → ${targetFormat}`);
