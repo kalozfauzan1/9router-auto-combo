@@ -65,6 +65,15 @@ export {
   getAutoLkgp, setAutoLkgp, promoteAutoLkgp, clearAutoLkgp,
 } from "./repos/autoComboRepo.js";
 
+// Relay LKGP + per-connection health
+export {
+  getRelayLkgp, setRelayLkgp, clearRelayLkgp,
+  getRelayHealth, getRelayHealthForModel,
+  bumpRelayFailure, noteRelayIdentityFail, resetRelayHealth,
+  clearAllRelayHealth, clearAllRelayLkgp,
+  getAllRelayLkgp, getAllRelayHealth,
+} from "./repos/relayLkgpRepo.js";
+
 // Usage
 export {
   statsEmitter, trackPendingRequest, getActiveRequests,

@@ -1,5 +1,8 @@
 # Unreleased
 
+## Features
+- **Relay**: per-provider + per-model last-known-good relay (LKGP) with per-class relay health cooldowns — transient 30s→5m, IP quarantine 30m→1h, credential 30m — and identity rejects ("free tier can only be used from within OpenCode") no longer penalize the relay; the provider page gains an independent "Relay LKGP" toggle (with the last-known-good relay and the number of cooling relays) and the new `GET`/`DELETE /api/models/relay-health` endpoint exposes the LKGP map, the relay health, and the cooldown state
+
 ## Fixes
 - **Auth / Proxy**: support proxy pool fallback and pool exclusion for no-auth free providers (`FREE_PROVIDERS`); mark `proxy:*` virtual connections unavailable on fallbackable HTTP errors (403/429/5xx) so rotating pools seamlessly fail over to working relays
 - **OpenCode**: match `deepseek-v4.1-flash-free` in `OPENCODE_FAMILIES` regex and add `deepseek-v4.1-flash-free` to OpenCode registry models with `[openai, claude, openai-responses]` supported formats

@@ -70,6 +70,8 @@ export default function ProviderDetailPage() {
   const [bulkUpdatingProxy, setBulkUpdatingProxy] = useState(false);
   const [providerStrategy, setProviderStrategy] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("");
+  const [lkgpEnabled, setLkgpEnabled] = useState(false);
+  const [relayStatus, setRelayStatus] = useState(null);
   const [thinkingMode, setThinkingMode] = useState("auto");
   const [autoPing, setAutoPing] = useState({ enabled: false, connections: {}, schedules: {} });
   const [scheduleConnection, setScheduleConnection] = useState(null);
@@ -328,6 +330,7 @@ export default function ProviderDetailPage() {
       const override = (settingsData.providerStrategies || {})[providerId] || {};
       setProviderStrategy(override.fallbackStrategy || null);
       setProviderStickyLimit(override.stickyRoundRobinLimit != null ? String(override.stickyRoundRobinLimit) : "1");
+      setLkgpEnabled(override.lkgpEnabled === true);
       // Load per-provider thinking config
       const thinkingCfg = (settingsData.providerThinking || {})[providerId] || {};
       setThinkingMode(thinkingCfg.mode || "auto");
@@ -377,18 +380,27 @@ export default function ProviderDetailPage() {
     }
   };
 
-  const saveProviderStrategy = async (strategy, stickyLimit) => {
+  const saveProviderStrategy = async (strategy, stickyLimit, lkgp) => {
     try {
       const settingsRes = await fetch("/api/settings", { cache: "no-store" });
       const settingsData = settingsRes.ok ? await settingsRes.json() : {};
       const current = settingsData.providerStrategies || {};
+      const previous = current[providerId] || {};
 
-      // Build override: null strategy means remove override, use global
-      const override = {};
+      // Build override: null strategy means remove override, use global.
+      // The stored fields are preserved so saving one control never drops
+      // another one (e.g. the LKGP flag or the sticky limit).
+      const override = { ...previous };
       if (strategy) override.fallbackStrategy = strategy;
+      else delete override.fallbackStrategy;
       if (strategy === "round-robin" && stickyLimit !== "") {
         override.stickyRoundRobinLimit = Number(stickyLimit) || 3;
+      } else {
+        delete override.stickyRoundRobinLimit;
       }
+      // Only `true` is stored — a disabled LKGP removes the key entirely.
+      if (lkgp === true) override.lkgpEnabled = true;
+      else delete override.lkgpEnabled;
 
       const updated = { ...current };
       if (Object.keys(override).length === 0) {
@@ -412,13 +424,37 @@ export default function ProviderDetailPage() {
     const sticky = enabled ? (providerStickyLimit || "1") : providerStickyLimit;
     if (enabled && !providerStickyLimit) setProviderStickyLimit("1");
     setProviderStrategy(strategy);
-    saveProviderStrategy(strategy, sticky);
+    saveProviderStrategy(strategy, sticky, lkgpEnabled);
   };
 
   const handleStickyLimitChange = (value) => {
     setProviderStickyLimit(value);
-    saveProviderStrategy("round-robin", value);
+    saveProviderStrategy("round-robin", value, lkgpEnabled);
   };
+
+  const handleLkgpToggle = (enabled) => {
+    setLkgpEnabled(enabled);
+    saveProviderStrategy(providerStrategy, providerStickyLimit, enabled);
+    fetchRelayStatus();
+  };
+
+  // Relay health snapshot for the status block. Fail-open: a missing endpoint
+  // or a failed request simply leaves the block hidden.
+  const fetchRelayStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/models/relay-health?provider=${encodeURIComponent(providerId)}`, { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const lkgpKeys = Object.keys(data?.lkgp || {});
+      const health = data?.health || {};
+      const now = Number(data?.now) || Date.now();
+      const cooldownCount = Object.values(health)
+        .filter((entry) => Number(entry?.cooldownUntil) > now).length;
+      setRelayStatus({ lkgpRelayId: lkgpKeys[0] || null, cooldownCount });
+    } catch (error) {
+      console.log("Error fetching relay health:", error);
+    }
+  }, [providerId]);
 
   const saveThinkingConfig = async (mode) => {
     try {
@@ -476,6 +512,11 @@ export default function ProviderDetailPage() {
     fetchCustomModels();
     fetchDisabledModels();
   }, [fetchConnections, fetchAliases, fetchCustomModels, fetchDisabledModels]);
+
+  // Relay LKGP / cooldown snapshot for the status block.
+  useEffect(() => {
+    fetchRelayStatus();
+  }, [fetchRelayStatus]);
 
   // Live per-connection catalogs (cursor, zed): the static registry carries
   // no usable list, so resolve from the active connection. Fires only when
@@ -1753,6 +1794,26 @@ export default function ProviderDetailPage() {
           )}
         </Card>
       )}
+
+      {/* Relay LKGP — independent of the round-robin strategy toggle */}
+      <Card>
+        <div className="flex flex-col gap-3">
+          <Toggle
+            checked={lkgpEnabled}
+            onChange={handleLkgpToggle}
+            label="Relay LKGP"
+            description="Prioritaskan relay yang terakhir berhasil; relay gagal diberi cooldown."
+          />
+        </div>
+        {relayStatus && (
+          <div className="mt-4 rounded-lg border border-black/[0.03] px-3 py-2 text-xs text-text-muted dark:border-white/[0.03]">
+            <div className="flex flex-wrap items-center gap-3">
+              <span>Relay terakhir berhasil: {relayStatus.lkgpRelayId || "-"}</span>
+              <span>Relay cooldown: {relayStatus.cooldownCount}</span>
+            </div>
+          </div>
+        )}
+      </Card>
 
       {/* Per-provider user overrides (custom headers / connect timeout) */}
       <CustomConfigCard providerId={providerId} />

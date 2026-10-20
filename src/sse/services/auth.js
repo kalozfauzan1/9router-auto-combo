@@ -1,7 +1,9 @@
-import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
+import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools, getRelayLkgp, getRelayHealthForModel, getRelayHealth, bumpRelayFailure, noteRelayIdentityFail, resetRelayHealth, setRelayLkgp } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { recordOpencodeRelayFailure, clearOpencodeRelayWarning } from "@/lib/network/opencodeRelayDiagnostics.js";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
+import { chooseRelay } from "open-sse/services/relaySelection.js";
+import { classifyRelayError, relayCooldownMs, applyJitter, nextFailStreak } from "open-sse/services/relayHealth.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { getAntigravityQuotaCache, getAntigravityModelQuota } from "./antigravityQuota.js";
@@ -11,6 +13,37 @@ import * as log from "../utils/logger.js";
 let selectionMutex = Promise.resolve();
 
 const GITHUB_MONTHLY_USAGE_LIMIT = "you've reached your additional usage limit for your plan";
+
+async function applyRelayLkgp({ providerId, model, candidateIds, pinId, now }) {
+  try {
+    const lkgp = await getRelayLkgp(providerId, model);
+    const health = await getRelayHealthForModel(model, candidateIds);
+    return chooseRelay({
+      candidates: candidateIds.map(id => ({ id })),
+      health,
+      lkgpId: lkgp?.connectionId || null,
+      pinId,
+      now,
+    });
+  } catch (error) {
+    log.debug("AUTH", `relay selection failed: ${error?.message || error}`);
+    return { mode: "none", chosen: null, ordered: candidateIds.map(id => ({ id })) };
+  }
+}
+
+/**
+ * Per-provider relay cooldown overrides.
+ * Fail-open: any storage/settings problem yields an empty config, so the
+ * built-in relay cooldown defaults stay in charge.
+ */
+async function relayCooldownConfig(providerId) {
+  try {
+    const settings = await getSettings();
+    return (settings.providerStrategies || {})[providerId]?.relayCooldown || {};
+  } catch {
+    return {};
+  }
+}
 
 function githubMonthlyResetMs(status, errorText, provider) {
   if (resolveProviderId(provider) !== "github" || Number(status) !== 402) return null;
@@ -60,7 +93,28 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           log.warn("AUTH", `${provider} | all proxy pools exhausted (${excludeSet.size} excluded)`);
           return null;
         }
-        pickedId = pickProxyPoolId(poolIds, strategy, providerId);
+        if (override.lkgpEnabled === true) {
+          // Relay health/LKGP keys use the same `proxy:<poolId>` id that
+          // markAccountUnavailable/clearAccountError receive.
+          const stripRelay = (id) => String(id).replace(/^proxy:/, "");
+          const relayResult = await applyRelayLkgp({
+            providerId,
+            model,
+            candidateIds: poolIds.map(id => `proxy:${id}`),
+            pinId: null,
+            now: Date.now(),
+          });
+          if (relayResult.mode === "lkgp" || relayResult.mode === "probe") {
+            pickedId = stripRelay(relayResult.chosen.id);
+            log.info("AUTH", `${provider} | relay ${relayResult.mode} ${pickedId.slice(0, 8)}`);
+          } else if (relayResult.mode === "healthy") {
+            pickedId = pickProxyPoolId(relayResult.ordered.map(c => stripRelay(c.id)), strategy, providerId);
+          } else {
+            pickedId = pickProxyPoolId(poolIds, strategy, providerId);
+          }
+        } else {
+          pickedId = pickProxyPoolId(poolIds, strategy, providerId);
+        }
       } else if (pickedId && (excludeSet.has(`proxy:${pickedId}`) || excludeSet.has(pickedId))) {
         log.warn("AUTH", `${provider} | configured proxy pool ${pickedId} excluded`);
         return null;
@@ -159,9 +213,30 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const providerOverride = (settings.providerStrategies || {})[providerId] || {};
     const strategy = providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
 
+    const lkgpEnabled = providerOverride.lkgpEnabled === true;
     let connection;
+    let connectionPool = availableConnections;
+
+    if (lkgpEnabled) {
+      const relayResult = await applyRelayLkgp({
+        providerId,
+        model,
+        candidateIds: availableConnections.map(c => c.id),
+        pinId: preferredConnectionId,
+        now: Date.now(),
+      });
+      if (relayResult.mode === "pinned" || relayResult.mode === "lkgp" || relayResult.mode === "probe") {
+        connection = availableConnections.find(c => c.id === relayResult.chosen.id);
+        log.info("AUTH", `${provider} | relay ${relayResult.mode} ${relayResult.chosen.id.slice(0, 8)}`);
+      } else if (relayResult.mode === "healthy") {
+        connectionPool = relayResult.ordered
+          .map(c => availableConnections.find(x => x.id === c.id))
+          .filter(Boolean);
+      }
+    }
+
     // Pin to preferred connection if specified and available
-    if (preferredConnectionId) {
+    if (!connection && preferredConnectionId) {
       connection = availableConnections.find((c) => c.id === preferredConnectionId);
       if (connection) {
         log.info("AUTH", `${provider} | pinned to ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"})`);
@@ -173,7 +248,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       const stickyLimit = providerOverride.stickyRoundRobinLimit || settings.stickyRoundRobinLimit || 3;
 
       // Sort by lastUsed (most recent first) to find current candidate
-      const byRecency = [...availableConnections].sort((a, b) => {
+      const byRecency = [...connectionPool].sort((a, b) => {
         if (!a.lastUsedAt && !b.lastUsedAt) return (a.priority || 999) - (b.priority || 999);
         if (!a.lastUsedAt) return 1;
         if (!b.lastUsedAt) return -1;
@@ -193,7 +268,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         });
       } else {
         // Pick the least recently used (excluding current if possible)
-        const sortedByOldest = [...availableConnections].sort((a, b) => {
+        const sortedByOldest = [...connectionPool].sort((a, b) => {
           if (!a.lastUsedAt && !b.lastUsedAt) return (a.priority || 999) - (b.priority || 999);
           if (!a.lastUsedAt) return -1;
           if (!b.lastUsedAt) return 1;
@@ -210,7 +285,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       }
     } else {
       // Default: fill-first (already sorted by priority in getProviderConnections)
-      connection = availableConnections[0];
+      connection = connectionPool[0];
     }
 
     const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
@@ -260,6 +335,22 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
  */
 export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null) {
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
+  const providerId = resolveProviderId(provider);
+  const errorClass = classifyRelayError(status, errorText);
+
+  // Identity rejects are not the relay's fault: try another relay, punish none.
+  if (errorClass === "identity") {
+    try { await noteRelayIdentityFail(connectionId, model); } catch { /* health only */ }
+    if (connectionId.startsWith("proxy:")) {
+      // Advisory OpenCode relay diagnostic (fail-open, never affects the result).
+      try {
+        await recordOpencodeRelayFailure({ connectionId, status, errorText, provider, model });
+      } catch { /* diagnostic only */ }
+    }
+    log.warn("AUTH", `${connectionId.slice(0,8)} | identity reject (no relay penalty) [${status}]`);
+    return { shouldFallback: true, cooldownMs: 0 };
+  }
+
   if (connectionId.startsWith("proxy:")) {
     const { shouldFallback, cooldownMs } = checkFallbackError(status, errorText, 0, provider);
     // Advisory OpenCode relay diagnostic (fail-open, never affects the result below).
@@ -267,6 +358,15 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
       try {
         await recordOpencodeRelayFailure({ connectionId, status, errorText, provider, model });
       } catch { /* diagnostic only */ }
+      // Relay health bookkeeping (fail-open, never affects the result below).
+      try {
+        const prev = await getRelayHealth(connectionId, model);
+        const now = Date.now();
+        const streak = nextFailStreak(prev?.failStreak, now, prev?.lastFailureAt);
+        const cfg = await relayCooldownConfig(providerId);
+        const relayCd = applyJitter(relayCooldownMs(errorClass, streak, cfg));
+        await bumpRelayFailure(connectionId, model, { errorClass, cooldownMs: relayCd, now });
+      } catch { /* health only */ }
     }
     return { shouldFallback, cooldownMs };
   }
@@ -307,6 +407,18 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     backoffLevel: newBackoffLevel ?? backoffLevel
   });
 
+  // Relay health bookkeeping (fail-open, never affects the result below).
+  if (shouldFallback) {
+    try {
+      const prev = await getRelayHealth(connectionId, model);
+      const now = Date.now();
+      const streak = nextFailStreak(prev?.failStreak, now, prev?.lastFailureAt);
+      const cfg = await relayCooldownConfig(providerId);
+      const relayCd = applyJitter(relayCooldownMs(errorClass, streak, cfg));
+      await bumpRelayFailure(connectionId, model, { errorClass, cooldownMs: relayCd, now });
+    } catch { /* health only */ }
+  }
+
   const lockKey = Object.keys(lockUpdate)[0];
   const connName = conn?.displayName || conn?.name || conn?.email || connectionId.slice(0, 8);
   log.warn("AUTH", `${connName} locked ${lockKey} for ${Math.round(cooldownMs / 1000)}s [${status}]`);
@@ -330,6 +442,15 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
  */
 export async function clearAccountError(connectionId, currentConnection, model = null, provider = null) {
   if (!connectionId || connectionId === "noauth") return;
+  // A real success promotes the connection to last-known-good and clears its
+  // relay health. Fail-open: health must not break the success path.
+  if (provider && connectionId) {
+    try {
+      const providerId = resolveProviderId(provider);
+      await setRelayLkgp(providerId, model, connectionId);
+      await resetRelayHealth(connectionId, model);
+    } catch { /* health must not break success path */ }
+  }
   if (connectionId.startsWith("proxy:")) {
     // OpenCode relay warning: a real success through the same pool clears the
     // active warning but keeps the last incident. Fail-open, advisory only.
