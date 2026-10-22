@@ -50,7 +50,7 @@ vi.mock("@/lib/network/opencodeRelayDiagnostics.js", () => ({
   clearOpencodeRelayWarning: mocks.clearOpencodeRelayWarning,
 }));
 
-const { markAccountUnavailable, clearAccountError } = await import("@/sse/services/auth.js");
+const { markAccountUnavailable, clearAccountError, getProviderCredentials } = await import("@/sse/services/auth.js");
 
 const IDENTITY_403 = "free tier can only be used from within OpenCode";
 const IP_QUARANTINE_403 = "OpenCode detected abusive traffic from this IP address";
@@ -190,5 +190,119 @@ describe("clearAccountError — relay LKGP hooks", () => {
       clearAccountError("conn-1", { _connection: {} }, "m", "opencode"),
     ).resolves.toBeUndefined();
     expect(mocks.updateProviderConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("markAccountUnavailable — hard quota (free lane)", () => {
+  const FREE_QUOTA_429 =
+    "Free usage limit reached. Subscribe to OpenCode Go to keep going: https://opencode.ai/go";
+
+  it("holds a quota-blocked relay for the upstream Retry-After, not the 429 backoff", async () => {
+    const sixHours = 6 * 60 * 60 * 1000;
+    const result = await markAccountUnavailable("proxy:abc", 429, FREE_QUOTA_429, "opencode", "m", null, 24 * 60 * 60 * 1000);
+
+    expect(result.shouldFallback).toBe(true);
+    expect(result.cooldownMs).toBe(sixHours);
+
+    const [connectionId, model, options] = mocks.bumpRelayFailure.mock.calls[0];
+    expect(connectionId).toBe("proxy:abc");
+    expect(model).toBe("m");
+    expect(options.errorClass).toBe("quota");
+    // Quota is spent per upstream identity, so the block is written pool-wide.
+    expect(options.scope).toBe("pool");
+    expect(options.cooldownMs).toBe(sixHours);
+  });
+
+  it("uses a 15 minute floor when the upstream reports no deadline", async () => {
+    const result = await markAccountUnavailable("proxy:abc", 429, FREE_QUOTA_429, "opencode", "m");
+
+    expect(result.shouldFallback).toBe(true);
+    expect(result.cooldownMs).toBe(15 * 60 * 1000);
+    expect(mocks.bumpRelayFailure.mock.calls[0][2].cooldownMs).toBe(15 * 60 * 1000);
+  });
+
+  it("keeps a generic 429 in the transient, model-scoped lane", async () => {
+    const result = await markAccountUnavailable("proxy:abc", 429, "rate limit exceeded", "opencode", "m", null, 6 * 60 * 60 * 1000);
+
+    expect(result.shouldFallback).toBe(true);
+    const options = mocks.bumpRelayFailure.mock.calls[0][2];
+    expect(options.errorClass).toBe("transient");
+    expect(options.scope).toBe("model");
+    expect(options.cooldownMs).toBeLessThan(60_000);
+  });
+
+  it("still returns shouldFallback when the quota write fails", async () => {
+    mocks.bumpRelayFailure.mockRejectedValueOnce(new Error("relay store unavailable"));
+
+    const result = await markAccountUnavailable("proxy:abc", 429, FREE_QUOTA_429, "opencode", "m");
+
+    expect(result.shouldFallback).toBe(true);
+    expect(result.cooldownMs).toBe(15 * 60 * 1000);
+  });
+});
+
+describe("getProviderCredentials — all-pools quota-blocked", () => {
+  const FREE_QUOTA_429 =
+    "Free usage limit reached. Subscribe to OpenCode Go to keep going: https://opencode.ai/go";
+  const now = Date.now();
+
+  function setupExhaustedPools() {
+    mocks.getSettings.mockResolvedValue({
+      providerStrategies: {
+        opencode: {
+          lkgpEnabled: true,
+          rotateStrategy: "round-robin",
+          relayCooldown: {},
+        },
+      },
+    });
+    mocks.getProxyPools.mockResolvedValue([
+      { id: "pool-a", name: "A", proxyUrl: "https://a.example", isActive: true },
+      { id: "pool-b", name: "B", proxyUrl: "https://b.example", isActive: true },
+    ]);
+    // Fresh, very different quota deadlines: probe interval has NOT elapsed
+    // for either pool (lastFailureAt is now).
+    mocks.getRelayHealthForModel.mockResolvedValue({
+      "proxy:pool-a": { errorClass: "quota", cooldownUntil: now + 3_600_000, lastFailureAt: now },
+      "proxy:pool-b": { errorClass: "quota", cooldownUntil: now + 7_200_000, lastFailureAt: now },
+    });
+    mocks.getRelayHealth.mockImplementation(async (connectionId) => mocks.getRelayHealthForModel.mock.results[0]?.value?.[connectionId] || null);
+  }
+
+  it("answers 429 with the earliest deadline instead of spending another upstream attempt", async () => {
+    setupExhaustedPools();
+
+    const result = await getProviderCredentials("opencode", null, "some-model");
+
+    expect(result.allRateLimited).toBe(true);
+    expect(result.status).toBe(429);
+    expect(new Date(result.retryAfter).getTime()).toBe(now + 3_600_000);
+    expect(result.lastErrorCode).toBe(429);
+  });
+
+  it("lets one probe through once the probe interval has lapsed", async () => {
+    setupExhaustedPools();
+    mocks.getRelayHealthForModel.mockImplementation(async () => ({
+      "proxy:pool-a": { errorClass: "quota", cooldownUntil: now + 3_600_000, lastFailureAt: now - 600_000 },
+      "proxy:pool-b": { errorClass: "quota", cooldownUntil: now + 7_200_000, lastFailureAt: now - 600_000 },
+    }));
+
+    const result = await getProviderCredentials("opencode", null, "some-model");
+
+    // The earliest-deadline pool gets the recovery probe.
+    expect(result).toBeTruthy();
+    expect(result.connectionId).toBe("proxy:pool-a");
+  });
+
+  it("still returns a usable pool when one lane is not quota-blocked", async () => {
+    setupExhaustedPools();
+    mocks.getRelayHealthForModel.mockResolvedValue({
+      "proxy:pool-a": { errorClass: "quota", cooldownUntil: now + 3_600_000, lastFailureAt: now },
+      "proxy:pool-b": { errorClass: null, cooldownUntil: 0 },
+    });
+
+    const result = await getProviderCredentials("opencode", null, "some-model");
+
+    expect(result.connectionId).toBe("proxy:pool-b");
   });
 });

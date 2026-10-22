@@ -92,6 +92,11 @@ export async function getRelayHealth(connectionId, model) {
 }
 
 /**
+ * Read the health of every candidate connection for one model lane.
+ *
+ * Pool-wide entries (`<connectionId>:*`) are merged in last, so a quota block
+ * recorded on one model lane applies to every other lane of the same relay.
+ *
  * @param {string} [model]
  * @param {string[]} [connectionIds] - Restrict to these connections when provided.
  * @returns {Promise<Record<string, object>>}
@@ -112,7 +117,35 @@ export async function getRelayHealthForModel(model, connectionIds) {
     if (allowed && !allowed.has(connectionId)) continue;
     out[connectionId] = value;
   }
+
+  const now = Date.now();
+  for (const [key, value] of Object.entries(all || {})) {
+    if (typeof key !== "string" || !key.endsWith(":*")) continue;
+    // Only an active pool-wide block changes another lane's health; idle
+    // wildcard entries (e.g. a cleared quota) must stay invisible.
+    if (!(Number(value?.cooldownUntil) > now)) continue;
+    const connectionId = key.slice(0, key.length - 2);
+    if (!connectionId) continue;
+    if (allowed && !allowed.has(connectionId)) continue;
+    out[connectionId] = mergeHealthEntries(out[connectionId], value);
+  }
+
   return out;
+}
+
+/**
+ * Keep whichever entry holds the later deadline; the model lane wins a tie.
+ *
+ * @param {object|undefined} laneEntry
+ * @param {object|undefined} poolEntry
+ * @returns {object|undefined}
+ */
+function mergeHealthEntries(laneEntry, poolEntry) {
+  if (!laneEntry) return poolEntry;
+  if (!poolEntry) return laneEntry;
+  const laneUntil = Number(laneEntry.cooldownUntil) || 0;
+  const poolUntil = Number(poolEntry.cooldownUntil) || 0;
+  return poolUntil > laneUntil ? poolEntry : laneEntry;
 }
 
 /**
@@ -121,13 +154,15 @@ export async function getRelayHealthForModel(model, connectionIds) {
  *
  * @param {string} connectionId
  * @param {string} [model]
- * @param {{ errorClass?: string, cooldownMs?: number, now?: number }} [options]
+ * @param {{ errorClass?: string, cooldownMs?: number, now?: number, scope?: "model"|"pool" }} [options]
+ *   `scope: "pool"` records the failure under the shared `<id>:*` key so it
+ *   applies to every model lane of that relay (used for hard quota rejections).
  * @returns {Promise<object|null>}
  */
-export async function bumpRelayFailure(connectionId, model, { errorClass = "transient", cooldownMs = 0, now = Date.now() } = {}) {
+export async function bumpRelayFailure(connectionId, model, { errorClass = "transient", cooldownMs = 0, now = Date.now(), scope = "model" } = {}) {
   if (!isId(connectionId)) return null;
 
-  const key = entryKey(connectionId, model);
+  const key = scope === "pool" ? entryKey(connectionId, "*") : entryKey(connectionId, model);
   const prev = asEntry(await healthKv.get(key, null));
   const at = timestamp(now);
   const cooldown = Number(cooldownMs);
@@ -189,7 +224,15 @@ export async function resetRelayHealth(connectionId, model, now = Date.now()) {
     errorClass: null,
   };
 
-  await healthKv.set(entryKey(connectionId, model), entry);
+  const key = entryKey(connectionId, model);
+  const poolKey = entryKey(connectionId, "*");
+  await healthKv.set(key, entry);
+  // A success proves the relay's quota is back, so a pool-wide block recorded
+  // by another model lane must not outlive it. Never create the shared key on
+  // success: only remove one that a quota rejection actually wrote.
+  if (key !== poolKey && asEntry(await healthKv.get(poolKey, null))) {
+    await healthKv.remove(poolKey);
+  }
   return entry;
 }
 

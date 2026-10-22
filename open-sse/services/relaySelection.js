@@ -6,7 +6,7 @@
  * explicitly so selection stays deterministic.
  */
 
-import { partitionRelayCandidates, orderRelayCandidates } from "./relayHealth.js";
+import { partitionRelayCandidates, orderRelayCandidates, isQuotaBlocked } from "./relayHealth.js";
 
 /**
  * Choose a relay candidate by pin, LKGP, health, then earliest cooldown probe.
@@ -18,7 +18,9 @@ import { partitionRelayCandidates, orderRelayCandidates } from "./relayHealth.js
  * @param {string|null} [options.pinId]
  * @param {number} [options.now]
  * @param {boolean} [options.allowProbe]
- * @returns {{ mode: "none"|"pinned"|"lkgp"|"healthy"|"probe", chosen: { id: string }|null, ordered: Array<{ id: string }>, cooling: Array<{ id: string }> }}
+ * @param {number} [options.probeIntervalMs] - Minimum spacing between probes of an
+ *   all-quota-blocked pool, measured from its most recent failure.
+ * @returns {{ mode: "none"|"pinned"|"lkgp"|"healthy"|"probe"|"exhausted", chosen: { id: string }|null, ordered: Array<{ id: string }>, cooling: Array<{ id: string }>, retryAt?: number|null }}
  */
 export function chooseRelay({
   candidates,
@@ -27,6 +29,7 @@ export function chooseRelay({
   pinId = null,
   now = 0,
   allowProbe = true,
+  probeIntervalMs = 300_000,
 }) {
   const list = Array.isArray(candidates) ? candidates : [];
   if (list.length === 0) {
@@ -61,8 +64,38 @@ export function chooseRelay({
       .sort((a, b) => a.until - b.until || a.index - b.index)
       .map(({ candidate }) => candidate);
 
+    // A quota-blocked relay carries an upstream deadline, not a backoff guess.
+    // Probing it on every request is what turns one exhausted pool into a storm
+    // of 429s, so an all-quota pool is probed at most once per interval.
+    if (ordered.every((candidate) => isQuotaBlocked(health?.[candidate?.id], now))) {
+      const lastFailureAt = ordered.reduce(
+        (latest, candidate) => Math.max(latest, Number(health?.[candidate?.id]?.lastFailureAt) || 0),
+        0
+      );
+      if (now - lastFailureAt < probeIntervalMs) {
+        return { mode: "exhausted", chosen: null, ordered, cooling, retryAt: earliestCooldown(ordered, health) };
+      }
+    }
+
     return { mode: "probe", chosen: ordered[0], ordered, cooling };
   }
 
   return { mode: "none", chosen: null, ordered: [], cooling };
+}
+
+/**
+ * Earliest cooldown expiry among the given candidates.
+ *
+ * @param {Array<{ id: string }>} candidates
+ * @param {Record<string, { cooldownUntil?: number|string }>} health
+ * @returns {number|null}
+ */
+function earliestCooldown(candidates, health) {
+  let earliest = null;
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const until = Number(health?.[candidate?.id]?.cooldownUntil);
+    if (!Number.isFinite(until)) continue;
+    if (earliest == null || until < earliest) earliest = until;
+  }
+  return earliest;
 }

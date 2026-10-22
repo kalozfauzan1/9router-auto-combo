@@ -3,7 +3,7 @@ import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/con
 import { recordOpencodeRelayFailure, clearOpencodeRelayWarning } from "@/lib/network/opencodeRelayDiagnostics.js";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { chooseRelay } from "open-sse/services/relaySelection.js";
-import { classifyRelayError, relayCooldownMs, applyJitter, nextFailStreak } from "open-sse/services/relayHealth.js";
+import { classifyRelayError, relayCooldownMs, applyJitter, nextFailStreak, quotaCooldownMs } from "open-sse/services/relayHealth.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { getAntigravityQuotaCache, getAntigravityModelQuota } from "./antigravityQuota.js";
@@ -29,6 +29,31 @@ async function applyRelayLkgp({ providerId, model, candidateIds, pinId, now }) {
     log.debug("AUTH", `relay selection failed: ${error?.message || error}`);
     return { mode: "none", chosen: null, ordered: candidateIds.map(id => ({ id })) };
   }
+}
+
+/**
+ * Build the "everything is quota-blocked" answer so the caller can return a
+ * real Retry-After instead of spending another upstream attempt.
+ *
+ * @param {string} provider
+ * @param {number|null|undefined} retryAt - Epoch ms of the earliest quota deadline.
+ * @returns {object|null} Null when no usable deadline is known.
+ */
+function quotaBlockedResponse(provider, retryAt) {
+  const until = Number(retryAt);
+  if (!Number.isFinite(until) || until <= Date.now()) return null;
+  const iso = new Date(until).toISOString();
+  log.warn("AUTH", `${provider} | all relays quota-blocked (${formatRetryAfter(iso)})`);
+  return {
+    allRateLimited: true,
+    // Quota exhaustion is a 429, not a broken gateway: keep the client's
+    // retry semantics aligned with the upstream answer.
+    status: 429,
+    retryAfter: iso,
+    retryAfterHuman: formatRetryAfter(iso),
+    lastError: "all relays are quota-blocked upstream",
+    lastErrorCode: 429
+  };
 }
 
 /**
@@ -104,7 +129,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
             pinId: null,
             now: Date.now(),
           });
-          if (relayResult.mode === "lkgp" || relayResult.mode === "probe") {
+          if (relayResult.mode === "exhausted") {
+            const blocked = quotaBlockedResponse(providerId, relayResult.retryAt);
+            if (blocked) return blocked;
+            // No usable deadline: fall back to the normal rotation.
+            pickedId = pickProxyPoolId(poolIds, strategy, providerId);
+          } else if (relayResult.mode === "lkgp" || relayResult.mode === "probe") {
             pickedId = stripRelay(relayResult.chosen.id);
             log.info("AUTH", `${provider} | relay ${relayResult.mode} ${pickedId.slice(0, 8)}`);
           } else if (relayResult.mode === "healthy") {
@@ -225,7 +255,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         pinId: preferredConnectionId,
         now: Date.now(),
       });
-      if (relayResult.mode === "pinned" || relayResult.mode === "lkgp" || relayResult.mode === "probe") {
+      if (relayResult.mode === "exhausted") {
+        const blocked = quotaBlockedResponse(providerId, relayResult.retryAt);
+        if (blocked) return blocked;
+      } else if (relayResult.mode === "pinned" || relayResult.mode === "lkgp" || relayResult.mode === "probe") {
         connection = availableConnections.find(c => c.id === relayResult.chosen.id);
         log.info("AUTH", `${provider} | relay ${relayResult.mode} ${relayResult.chosen.id.slice(0, 8)}`);
       } else if (relayResult.mode === "healthy") {
@@ -333,7 +366,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
  * @param {string|null} model - The specific model that triggered the error
  * @returns {{ shouldFallback: boolean, cooldownMs: number }}
  */
-export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null) {
+export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null, retryAfterMs = null) {
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
   const providerId = resolveProviderId(provider);
   const errorClass = classifyRelayError(status, errorText);
@@ -359,14 +392,27 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
         await recordOpencodeRelayFailure({ connectionId, status, errorText, provider, model });
       } catch { /* diagnostic only */ }
       // Relay health bookkeeping (fail-open, never affects the result below).
+      let effectiveCooldownMs = cooldownMs;
       try {
         const prev = await getRelayHealth(connectionId, model);
         const now = Date.now();
         const streak = nextFailStreak(prev?.failStreak, now, prev?.lastFailureAt);
         const cfg = await relayCooldownConfig(providerId);
-        const relayCd = applyJitter(relayCooldownMs(errorClass, streak, cfg));
-        await bumpRelayFailure(connectionId, model, { errorClass, cooldownMs: relayCd, now });
+        const quota = errorClass === "quota";
+        const relayCd = quota
+          ? quotaCooldownMs({ retryAfterMs, resetsAtMs, now, config: cfg })
+          : applyJitter(relayCooldownMs(errorClass, streak, cfg));
+        if (quota) effectiveCooldownMs = Math.max(cooldownMs, relayCd);
+        await bumpRelayFailure(connectionId, model, {
+          errorClass,
+          cooldownMs: relayCd,
+          now,
+          // Quota is spent per upstream identity, so every model lane on this
+          // relay shares the block; only the relay's own deadline lifts it.
+          scope: quota ? "pool" : "model",
+        });
       } catch { /* health only */ }
+      return { shouldFallback, cooldownMs: effectiveCooldownMs };
     }
     return { shouldFallback, cooldownMs };
   }
@@ -414,8 +460,16 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
       const now = Date.now();
       const streak = nextFailStreak(prev?.failStreak, now, prev?.lastFailureAt);
       const cfg = await relayCooldownConfig(providerId);
-      const relayCd = applyJitter(relayCooldownMs(errorClass, streak, cfg));
-      await bumpRelayFailure(connectionId, model, { errorClass, cooldownMs: relayCd, now });
+      const quota = errorClass === "quota";
+      const relayCd = quota
+        ? quotaCooldownMs({ retryAfterMs, resetsAtMs, now, config: cfg })
+        : applyJitter(relayCooldownMs(errorClass, streak, cfg));
+      await bumpRelayFailure(connectionId, model, {
+        errorClass,
+        cooldownMs: relayCd,
+        now,
+        scope: quota ? "pool" : "model",
+      });
     } catch { /* health only */ }
   }
 

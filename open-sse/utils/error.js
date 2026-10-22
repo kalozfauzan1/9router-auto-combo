@@ -1,4 +1,5 @@
 import { ERROR_TYPES, DEFAULT_ERROR_MESSAGES } from "../config/errorConfig.js";
+import { parseRetryAfterMs } from "../services/relayHealth.js";
 
 /**
  * Build OpenAI-compatible error response body
@@ -54,9 +55,16 @@ export async function writeStreamError(writer, statusCode, message) {
  * Parse upstream provider error response
  * @param {Response} response - Fetch response from provider
  * @param {object} [executor] - Optional executor with parseError() override for provider-specific parsing
- * @returns {Promise<{statusCode: number, message: string, resetsAtMs?: number}>}
+ * @returns {Promise<{statusCode: number, message: string, resetsAtMs?: number, retryAfterMs?: number|null}>}
  */
 export async function parseUpstreamError(response, executor = null) {
+  // The upstream deadline is the only reliable quota signal: OpenCode Free
+  // answers 429 with Retry-After measured in hours, which a fixed backoff
+  // would silently truncate.
+  const retryAfterMs = parseRetryAfterMs(
+    typeof response?.headers?.get === "function" ? response.headers.get("retry-after") : null,
+    Date.now()
+  );
   let bodyText = "";
   try {
     bodyText = await response.text();
@@ -70,7 +78,7 @@ export async function parseUpstreamError(response, executor = null) {
       const parsed = executor.parseError(response, bodyText);
       if (parsed && typeof parsed === "object") {
         const msg = parsed.message || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
-        return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs };
+        return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs, retryAfterMs };
       }
     } catch { /* fall through to default parsing */ }
   }
@@ -86,7 +94,7 @@ export async function parseUpstreamError(response, executor = null) {
   const messageStr = typeof message === "string" ? message : JSON.stringify(message);
   const finalMessage = messageStr || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
 
-  return { statusCode: response.status, message: finalMessage };
+  return { statusCode: response.status, message: finalMessage, retryAfterMs };
 }
 
 /**
@@ -94,14 +102,17 @@ export async function parseUpstreamError(response, executor = null) {
  * @param {number} statusCode - HTTP status code
  * @param {string} message - Error message
  * @param {number} [resetsAtMs] - Optional precise cooldown expiry (ms epoch) for provider-specific quota errors
- * @returns {{ success: false, status: number, error: string, response: Response, resetsAtMs?: number }}
+ * @param {object|null} [extraHeaders]
+ * @param {number|null} [retryAfterMs] - Upstream Retry-After as a duration, when present
+ * @returns {{ success: false, status: number, error: string, response: Response, resetsAtMs?: number, retryAfterMs?: number|null }}
  */
-export function createErrorResult(statusCode, message, resetsAtMs, extraHeaders = null) {
+export function createErrorResult(statusCode, message, resetsAtMs, extraHeaders = null, retryAfterMs = null) {
   return {
     success: false,
     status: statusCode,
     error: message,
     resetsAtMs,
+    retryAfterMs,
     response: errorResponse(statusCode, message, extraHeaders)
   };
 }

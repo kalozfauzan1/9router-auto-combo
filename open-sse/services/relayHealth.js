@@ -10,7 +10,7 @@
  *
  * @param {number} status - Upstream HTTP status.
  * @param {string} [errorText] - Upstream error body/message.
- * @returns {"transient"|"ip-quarantine"|"credential"|"identity"|"model-lane"|"request"}
+ * @returns {"transient"|"quota"|"ip-quarantine"|"credential"|"identity"|"model-lane"|"request"}
  */
 export function classifyRelayError(status, errorText) {
   const text = typeof errorText === "string" ? errorText.toLowerCase() : "";
@@ -23,6 +23,11 @@ export function classifyRelayError(status, errorText) {
   ) {
     return "identity";
   }
+
+  // Hard quota rejection: the free lane is spent for this identity until a
+  // stated deadline. Keeping it out of the transient 429 lane is what stops a
+  // relay from being re-probed every backoff tick while it is still exhausted.
+  if (isQuotaErrorText(text)) return "quota";
 
   if (status === 404 || status === 410) return "model-lane";
   if (status === 400 || status === 422) return "request";
@@ -54,6 +59,9 @@ export function relayCooldownMs(errorClass, failStreak, config = {}) {
       return 0;
     case "credential":
       return cfg.credentialMs ?? 1_800_000;
+    case "quota":
+      // Floor only; the real deadline comes from Retry-After via quotaCooldownMs().
+      return cfg.quotaMs ?? 900_000;
     case "ip-quarantine":
       return scaledCooldown(cfg.ipQuarantineMs ?? 1_800_000, cfg.ipQuarantineMaxMs ?? 3_600_000, failStreak);
     case "transient":
@@ -61,6 +69,104 @@ export function relayCooldownMs(errorClass, failStreak, config = {}) {
     default:
       return 0;
   }
+}
+
+/**
+ * Upstream wording that means "the free quota for this identity is spent",
+ * as opposed to "slow down for a moment".
+ */
+const QUOTA_ERROR_MARKERS = [
+  "free usage limit",
+  "freeusagelimiterror",
+  "subscribe to opencode go",
+  "go usage limit",
+  "go_usage_limit",
+  "usage_limit_reached",
+];
+
+/**
+ * @param {string} errorText - Upstream error text, any case.
+ * @returns {boolean}
+ */
+export function isQuotaErrorText(errorText) {
+  const text = typeof errorText === "string" ? errorText.toLowerCase() : "";
+  if (!text) return false;
+  return QUOTA_ERROR_MARKERS.some((marker) => text.includes(marker));
+}
+
+/**
+ * Parse an upstream `Retry-After` header into a duration.
+ * Both RFC 9110 forms are accepted: delta-seconds and HTTP-date.
+ *
+ * @param {string|number|null|undefined} value
+ * @param {number} [now] - Current epoch milliseconds.
+ * @returns {number|null} Duration in milliseconds, or null when unusable.
+ */
+export function parseRetryAfterMs(value, now = Date.now()) {
+  if (value == null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  if (/^\d+$/.test(raw)) {
+    const seconds = Number(raw);
+    return Number.isFinite(seconds) ? seconds * 1000 : null;
+  }
+
+  const at = Date.parse(raw);
+  const base = Number(now);
+  if (!Number.isFinite(at) || !Number.isFinite(base)) return null;
+  return Math.max(at - base, 0);
+}
+
+/**
+ * Cooldown for a hard quota rejection.
+ *
+ * The upstream deadline wins when it is known; otherwise a floor long enough
+ * to stop the probe storm is used. Always capped, so a pool is never parked
+ * longer than the caller allows.
+ *
+ * @param {object} [options]
+ * @param {number|null} [options.retryAfterMs]
+ * @param {number|null} [options.resetsAtMs]
+ * @param {number} [options.now]
+ * @param {object} [options.config]
+ * @returns {number} Cooldown in milliseconds.
+ */
+export function quotaCooldownMs({ retryAfterMs = null, resetsAtMs = null, now = Date.now(), config = {} } = {}) {
+  const cfg = config || {};
+  const base = positiveMs(cfg.quotaMs, 900_000);
+  const min = positiveMs(cfg.quotaMinMs, 60_000);
+  const max = positiveMs(cfg.quotaMaxMs, 6 * 60 * 60 * 1000);
+
+  const declared = [];
+  const retry = Number(retryAfterMs);
+  if (Number.isFinite(retry) && retry > 0) declared.push(retry);
+  const reset = Number(resetsAtMs);
+  if (Number.isFinite(reset) && reset > Number(now)) declared.push(reset - Number(now));
+
+  if (declared.length === 0) return Math.min(base, max);
+  return Math.min(Math.max(Math.max(...declared), min), max);
+}
+
+/**
+ * @param {number|string|undefined} value
+ * @param {number} fallback
+ * @returns {number}
+ */
+function positiveMs(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * Whether a health entry is holding the relay out of rotation for quota.
+ *
+ * @param {{ cooldownUntil?: number|string, errorClass?: string }|null|undefined} healthEntry
+ * @param {number} now - Current epoch milliseconds.
+ * @returns {boolean}
+ */
+export function isQuotaBlocked(healthEntry, now) {
+  return healthEntry?.errorClass === "quota" && Number(healthEntry?.cooldownUntil) > now;
 }
 
 /**
