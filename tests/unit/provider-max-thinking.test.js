@@ -3,10 +3,10 @@ import { applyProviderThinking } from "../../open-sse/translator/concerns/provid
 import { applyThinking, extractThinking } from "../../open-sse/translator/concerns/thinkingUnified.js";
 
 describe("provider max thinking", () => {
-  it("maps mode max to reasoning_effort xhigh without mutating the original body", () => {
+  it("maps mode max to reasoning_effort max without mutating the original body", () => {
     const body = { messages: [] };
     const result = applyProviderThinking(body, { mode: "max" }, "opencode", "mimo-v2.6-free");
-    expect(result.reasoning_effort).toBe("xhigh");
+    expect(result.reasoning_effort).toBe("max");
     expect(body.reasoning_effort).toBeUndefined();
   });
 
@@ -30,7 +30,7 @@ describe("provider max thinking", () => {
     const before = JSON.parse(JSON.stringify(body));
 
     const maxResult = applyProviderThinking(body, { mode: "max" }, "opencode", "mimo-v2.6-free");
-    expect(maxResult.reasoning_effort).toBe("xhigh");
+    expect(maxResult.reasoning_effort).toBe("max");
     expect(body).toEqual(before);
 
     // Mode "off" leaves every listed shape untouched, including explicit-off inputs.
@@ -47,8 +47,8 @@ describe("provider max thinking", () => {
     expect(applyProviderThinking(body, { mode: "max" }, "openai", "gpt-4o")).toBe(body);
   });
 
-  it("strict suffix floor raises suffixed low to xhigh", () => {
-    expect(applyProviderThinking({}, { mode: "max" }, "opencode", "mimo-v2.6-free(low)").reasoning_effort).toBe("xhigh");
+  it("strict suffix floor raises suffixed low to max", () => {
+    expect(applyProviderThinking({}, { mode: "max" }, "opencode", "mimo-v2.6-free(low)").reasoning_effort).toBe("max");
   });
 
   it("keeps suffix xhigh unchanged against provider high floor", () => {
@@ -63,7 +63,7 @@ describe("provider max thinking", () => {
   it.each([
     ["deepseek-v4.1-flash-free", "max"],
     ["glm-5.3-flash-free", "xhigh"],
-    ["mimo-v2.6-free", "xhigh"],
+    ["mimo-v2.6-free", "max"],
   ])("wires max mode for %s to reasoning_effort %s on the openai wire", (model, expected) => {
     const result = applyProviderThinking({ messages: [] }, { mode: "max" }, "opencode", model);
     const wire = applyThinking("openai", model, result, "opencode");
@@ -91,8 +91,9 @@ describe("provider max thinking", () => {
     expect(off.thinking.type).toBe("enabled");
 
     const low = applyThinking("openai", model, applyProviderThinking(body, { mode: "low" }, "opencode", model), "opencode");
-    // deepseek-format models map low/medium to high on the wire
-    expect(low.reasoning_effort).toBe("high");
+    // deepseek-format models collapse medium to high, but a declared "low"
+    // level now passes through verbatim (upstream v0.5.109).
+    expect(low.reasoning_effort).toBe("low");
 
     expect(applyThinking("openai", "hy4-preview", applyProviderThinking({ messages: [] }, { mode: "low" }, "codebuddy-cn", "hy4-preview"), "codebuddy-cn").reasoning_effort).toBe("low");
 
@@ -135,15 +136,15 @@ describe("provider max thinking", () => {
     expect(body.thinking.budget_tokens).toBe(32768);
   });
 
-  it("upgrades output_config effort low so extractThinking reports xhigh", () => {
+  it("upgrades output_config effort low so extractThinking reports max", () => {
     const result = applyProviderThinking({ output_config: { effort: "low" } }, { mode: "max" }, "opencode", "mimo-v2.6-free");
-    expect(extractThinking(result)?.level).toBe("xhigh");
+    expect(extractThinking(result)?.level).toBe("max");
   });
 
   it("retains unrelated nested output_config fields when raising effort", () => {
     const body = { output_config: { effort: "low", channel: "combo", retries: 2 } };
     const result = applyProviderThinking(body, { mode: "max" }, "opencode", "mimo-v2.6-free");
-    expect(result.reasoning_effort).toBe("xhigh");
+    expect(result.reasoning_effort).toBe("max");
     expect(result.output_config.effort).toBeUndefined();
     expect(result.output_config).toEqual({ channel: "combo", retries: 2 });
   });
@@ -151,7 +152,7 @@ describe("provider max thinking", () => {
   it("retains reasoning summary and display when raising nested low effort", () => {
     const body = { reasoning: { effort: "low", summary: "auto", display: "raw" } };
     const result = applyProviderThinking(body, { mode: "max" }, "opencode", "mimo-v2.6-free");
-    expect(result.reasoning_effort).toBe("xhigh");
+    expect(result.reasoning_effort).toBe("max");
     expect(result.reasoning.summary).toBe("auto");
     expect(result.reasoning.display).toBe("raw");
     expect(body).toEqual({ reasoning: { effort: "low", summary: "auto", display: "raw" } });
@@ -162,7 +163,7 @@ describe("provider max thinking", () => {
     const result = applyProviderThinking(body, { mode: "max" }, "opencode", "mimo-v2.6-free");
     expect(result).not.toBe(body);
     expect(result.enable_thinking).toBeUndefined();
-    expect(result.reasoning_effort).toBe("xhigh");
+    expect(result.reasoning_effort).toBe("max");
     expect(body).toEqual({ enable_thinking: false });
   });
 
@@ -171,7 +172,7 @@ describe("provider max thinking", () => {
     const result = applyProviderThinking(body, { mode: "max" }, "opencode", "mimo-v2.6-free");
     expect(result).not.toBe(body);
     expect(result.thinkingConfig).toBeUndefined();
-    expect(result.reasoning_effort).toBe("xhigh");
+    expect(result.reasoning_effort).toBe("max");
     expect(body).toEqual({ thinkingConfig: { thinkingBudget: 0, includeThoughts: false } });
   });
 

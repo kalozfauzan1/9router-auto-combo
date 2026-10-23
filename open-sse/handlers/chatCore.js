@@ -119,9 +119,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const previousBody = body;
   body = applyProviderThinking(body, providerThinking, provider, model);
   const floorChanged = body !== previousBody;
-  const thinkingModel = floorChanged ? stripThinkingSuffix(upstreamModel) : upstreamModel;
-
   const upstreamModel = getModelUpstreamId(alias, model, body);
+  const thinkingModel = floorChanged ? stripThinkingSuffix(upstreamModel) : upstreamModel;
 
   // Per-request opt-out: client can bypass all token savers via header
   const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
