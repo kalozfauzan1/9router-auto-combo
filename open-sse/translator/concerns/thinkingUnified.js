@@ -129,16 +129,19 @@ const NATIVE_ONLY_FORMATS = new Set(["gemini-level", "gemini-budget", "claude-bu
 
 function resolveFormat(targetFormat, model, provider) {
   if (targetFormat === "commandcode") return "commandcode";
+  // A multi-endpoint provider can declare, per transports[] entry, the thinking shape that
+  // endpoint accepts. It wins over the model's thinkingFormat, which describes the Chat wire:
+  // strict /responses upstreams (Meta, OpenCode Go) reject Chat-shaped reasoning_effort /
+  // thinking:{type} and need reasoning:{effort,summary} instead.
+  const transportFmt = provider
+    ? PROVIDERS[provider]?.transports?.find((t) => t.format === targetFormat)?.thinkingFormat
+    : null;
+  if (transportFmt) return transportFmt;
   const providerFmt = provider ? PROVIDERS[provider]?.thinkingFormat : null;
   if (providerFmt) return providerFmt;
   const caps = getCapabilitiesForModel(provider, model);
   const isOpenAIWire = targetFormat === "openai" || targetFormat === "openai-responses";
   if (caps.thinkingFormat && !(isOpenAIWire && NATIVE_ONLY_FORMATS.has(caps.thinkingFormat))) {
-    // Muse (Meta) strict Responses API rejects top-level reasoning_effort and
-    // requires nested reasoning: { effort, summary }. Other upstreams keep Chat-shaped effort.
-    if (provider === "muse" && targetFormat === "openai-responses") {
-      return "openai-responses";
-    }
     return caps.thinkingFormat;
   }
   return FORMAT_TO_NATIVE[targetFormat] || "openai";
@@ -349,15 +352,20 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
     case "deepseek": {
       if (none && canDisable) { body.thinking = { type: "disabled" }; break; }
       body.thinking = { type: "enabled" };
-      // DeepSeek: low/medium→high, xhigh/max→max. Some backends (mimo v2.5-pro/v2.6
-      // on opencode-go, probed live) 400 on "max" — clamp to high when the declared
-      // levels exclude it.
-      // xhigh is advertised by the model's own level list (e.g. mimo-v2.6) and the
-      // Zen upstream accepts it (live probe: HTTP 200), so pass it through instead
-      // of routing it through the max clamp which used to downgrade it to high.
+      // DeepSeek: low/medium→high, xhigh/max→max, with the declared level list
+      // winning where it disagrees. Zen's free deepseek-v4.1-flash publishes
+      // low|high|max and takes the level verbatim, so collapsing "low" would make
+      // that level unreachable. xhigh is advertised by the model's own level list
+      // (e.g. mimo-v2.6) and the Zen upstream accepts it (live probe: HTTP 200), so
+      // pass it through rather than routing it through the max clamp that used to
+      // downgrade it to high. Some backends (mimo v2.5-pro/v2.6 on opencode-go,
+      // probed live) 400 on "max" — the shared clamp below falls back to high when
+      // the declared levels exclude it.
       const level = toLevel(eff);
-      const passthrough = level === "xhigh" && supportedLevels?.includes("xhigh");
-      const want = passthrough ? "xhigh" : (level === "xhigh" || level === "max" ? "max" : "high");
+      const want = level === "xhigh" && supportedLevels?.includes("xhigh") ? "xhigh"
+        : level === "xhigh" || level === "max" ? "max"
+        : (level === "low" || level === "minimal") && supportedLevels?.includes("low") ? "low"
+        : "high";
       body.reasoning_effort = want === "max" && supportedLevels && !supportedLevels.includes("max") ? "high" : want;
       break;
     }
