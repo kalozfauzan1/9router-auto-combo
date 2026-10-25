@@ -107,6 +107,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       const settings = await getSettings();
       const override = (settings.providerStrategies || {})[providerId] || {};
       const strategy = override.rotateStrategy || "none";
+      const isOpencode = providerId === "opencode";
       let pickedId = override.proxyPoolId || null;
       let allPools = [];
       if (strategy !== "none") {
@@ -149,28 +150,28 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       } else if (pickedId && (excludeSet.has(`proxy:${pickedId}`) || excludeSet.has(pickedId))) {
         log.warn("AUTH", `${provider} | configured proxy pool ${pickedId} excluded`);
         return null;
-      } else if (pickedId && pickedId !== "__none__") {
+      } else if (isOpencode && pickedId && pickedId !== "__none__") {
         allPools = await getProxyPools({ isActive: true });
       }
       const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
       const connectionId = pickedId ? `proxy:${pickedId}` : "noauth";
       const connectionName = pickedId ? (resolvedProxy.proxyPool?.name || `Proxy (${pickedId.slice(0, 8)})`) : "Public";
 
-      // Free-lane 429 retry needs other exits: every active pool except the one
-      // this request leaves through, and except pools already exhausted here.
-      const connectionProxyAlternates = allPools
-        .filter(p => p.id !== resolvedProxy.proxyPoolId)
-        .filter(p => !excludeSet.has(`proxy:${p.id}`) && !excludeSet.has(p.id))
-        .map(proxyConfigFromPool)
-        .filter(Boolean)
-        .map(cfg => ({
-          proxyPoolId: cfg.proxyPoolId,
-          connectionProxyEnabled: cfg.connectionProxyEnabled,
-          connectionProxyUrl: cfg.connectionProxyUrl,
-          connectionNoProxy: cfg.connectionNoProxy,
-          vercelRelayUrl: cfg.vercelRelayUrl || "",
-          strictProxy: cfg.strictProxy === true,
-        }));
+      const connectionProxyAlternates = isOpencode
+        ? allPools
+          .filter(p => p.id !== resolvedProxy.proxyPoolId)
+          .filter(p => !excludeSet.has(`proxy:${p.id}`) && !excludeSet.has(p.id))
+          .map(proxyConfigFromPool)
+          .filter(Boolean)
+          .map(cfg => ({
+            proxyPoolId: cfg.proxyPoolId,
+            connectionProxyEnabled: cfg.connectionProxyEnabled,
+            connectionProxyUrl: cfg.connectionProxyUrl,
+            connectionNoProxy: cfg.connectionNoProxy,
+            vercelRelayUrl: cfg.vercelRelayUrl || "",
+            strictProxy: cfg.strictProxy === true,
+          }))
+        : [];
       return {
         id: connectionId,
         connectionId,
@@ -184,7 +185,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
           vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
           strictProxy: resolvedProxy.strictProxy === true,
-          connectionProxyAlternates,
+          ...(isOpencode ? { connectionProxyAlternates } : {}),
         },
       };
     }
