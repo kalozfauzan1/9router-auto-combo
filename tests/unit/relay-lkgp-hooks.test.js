@@ -43,6 +43,14 @@ vi.mock("@/lib/localDb", () => ({
 vi.mock("@/lib/network/connectionProxy", () => ({
   resolveConnectionProxyConfig: mocks.resolveConnectionProxyConfig,
   pickProxyPoolId: mocks.pickProxyPoolId,
+  proxyConfigFromPool: (pool) => ({
+    proxyPoolId: pool.id,
+    connectionProxyEnabled: true,
+    connectionProxyUrl: pool.proxyUrl,
+    connectionNoProxy: "",
+    vercelRelayUrl: pool.vercelRelayUrl || "",
+    strictProxy: pool.strictProxy === true,
+  }),
 }));
 
 vi.mock("@/lib/network/opencodeRelayDiagnostics.js", () => ({
