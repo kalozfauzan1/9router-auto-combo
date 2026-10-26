@@ -21,6 +21,7 @@ import {
   describeEgress,
   DIRECT_EGRESS_ID,
 } from "../utils/egress.js";
+import { opencodeTlsFetch } from "../services/opencodeTlsClient.js";
 import { ANTHROPIC_API_VERSION } from "../providers/shared.js";
 import {
   normalizeResponsesInput,
@@ -94,6 +95,15 @@ export function generateSessionId(timestamp = Date.now()) {
 // one session across turns instead of getting a fresh one every request.
 const translatedOpencodeSessions = new Map();
 const MAX_TRANSLATED_SESSIONS = 1000;
+const translatedSessionCleanup = setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of translatedOpencodeSessions) {
+    if (now - entry.lastUsed > MEMORY_CONFIG.sessionTtlMs) {
+      translatedOpencodeSessions.delete(key);
+    }
+  }
+}, MEMORY_CONFIG.sessionCleanupIntervalMs);
+if (translatedSessionCleanup.unref) translatedSessionCleanup.unref();
 
 export function translateSessionId(sessionId, clientTool = "", egressId = "", epoch = 0) {
   if (typeof sessionId === "string" && OPENCODE_SESSION_RE.test(sessionId.trim())) {
@@ -464,12 +474,17 @@ export class OpenCodeExecutor extends BaseExecutor {
       applyFingerprintTools(body, true);
     } else if (body && typeof body === "object") {
       dropAdaptiveReasoningEffort(body);
-      applyFingerprintTools(body, false);
+      applyFingerprintTools(body, false, { claude: isMessagesModel(model || body?.model) });
     }
     applyFingerprintSystemPrompt(body);
     return injectReasoningContent({ provider: this.provider, model, body });
   }
 
+  // The free gate keys on the TLS ClientHello, so a native Node fetch is refused
+  // no matter how faithful the body is. Route through the impersonating client
+  // and keep proxy handling on the existing path (proxyAwareFetch delegates to
+  // `directFetch` when no proxy is configured). Fail-open: without wreq-js the
+  // request still goes out on native fetch instead of erroring here.
   async execute(args) {
     const { model, stream, credentials, log } = args;
     let proxyOptions = args.proxyOptions || null;
@@ -528,7 +543,16 @@ export class OpenCodeExecutor extends BaseExecutor {
     const prepared = this.prepareRequestCredentials({ ...args, egressId: egress.id });
     const retryBody = hasAlternateEgresses(proxyOptions) ? cloneRequestBody(args.body) : null;
 
-    let result = await super.execute({ ...args, credentials: prepared, proxyOptions });
+    let result = await super.execute({
+      ...args,
+      credentials: prepared,
+      proxyOptions,
+      directFetch: (url, options) => opencodeTlsFetch(url, {
+        method: options.method,
+        headers: options.headers,
+        body: options.body,
+      }, { signal: options.signal }),
+    });
 
     if (!result?.response || result.response.status !== 429) return result;
 
@@ -587,6 +611,11 @@ export class OpenCodeExecutor extends BaseExecutor {
       body: retryBody || args.body,
       credentials: retryCredentials,
       proxyOptions: retryProxyOptions,
+      directFetch: (url, options) => opencodeTlsFetch(url, {
+        method: options.method,
+        headers: options.headers,
+        body: options.body,
+      }, { signal: options.signal }),
     });
 
     if (retryResult?.response?.status === 429) {
