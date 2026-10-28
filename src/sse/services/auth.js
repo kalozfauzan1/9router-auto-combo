@@ -1,5 +1,6 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools, getRelayLkgp, getRelayHealthForModel, getRelayHealth, bumpRelayFailure, noteRelayIdentityFail, resetRelayHealth, setRelayLkgp } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId, proxyConfigFromPool } from "@/lib/network/connectionProxy";
+import { resolveOpencodeFreeLaneMode, shouldBypassRelayPool } from "open-sse/utils/opencodeFreeLane.js";
 import { recordOpencodeRelayFailure, clearOpencodeRelayWarning } from "@/lib/network/opencodeRelayDiagnostics.js";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { chooseRelay } from "open-sse/services/relaySelection.js";
@@ -108,9 +109,11 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       const override = (settings.providerStrategies || {})[providerId] || {};
       const strategy = override.rotateStrategy || "none";
       const isOpencode = providerId === "opencode";
+      const freeLaneMode = isOpencode ? resolveOpencodeFreeLaneMode(providerId) : null;
+      const forceDirect = isOpencode && freeLaneMode === "direct";
       let pickedId = override.proxyPoolId || null;
       let allPools = [];
-      if (strategy !== "none") {
+      if (strategy !== "none" && !forceDirect) {
         allPools = await getProxyPools({ isActive: true });
         const poolIds = allPools
           .filter(p => p.proxyUrl)
@@ -132,10 +135,15 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
             now: Date.now(),
           });
           if (relayResult.mode === "exhausted") {
-            const blocked = quotaBlockedResponse(providerId, relayResult.retryAt);
-            if (blocked) return blocked;
-            // No usable deadline: fall back to the normal rotation.
-            pickedId = pickProxyPoolId(poolIds, strategy, providerId);
+            if (shouldBypassRelayPool(freeLaneMode)) {
+              pickedId = null;
+              log.warn("AUTH", `${provider} | free lane direct fallback (relay pool exhausted)`);
+            } else {
+              const blocked = quotaBlockedResponse(providerId, relayResult.retryAt);
+              if (blocked) return blocked;
+              // No usable deadline: fall back to the normal rotation.
+              pickedId = pickProxyPoolId(poolIds, strategy, providerId);
+            }
           } else if (relayResult.mode === "lkgp" || relayResult.mode === "probe") {
             pickedId = stripRelay(relayResult.chosen.id);
             log.info("AUTH", `${provider} | relay ${relayResult.mode} ${pickedId.slice(0, 8)}`);
@@ -152,6 +160,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         return null;
       } else if (isOpencode && pickedId && pickedId !== "__none__") {
         allPools = await getProxyPools({ isActive: true });
+      }
+      if (forceDirect) {
+        pickedId = null;
+        log.warn("AUTH", `${provider} | free lane direct (OPENCODE_FREE_LANE=direct)`);
       }
       const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
       const connectionId = pickedId ? `proxy:${pickedId}` : "noauth";

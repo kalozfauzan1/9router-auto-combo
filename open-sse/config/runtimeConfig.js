@@ -72,6 +72,10 @@ export const OPENCODE_TRANSPORT_CONFIG = {
   failureBackoffMs: envMs("OPENCODE_TRANSPORT_BACKOFF_MS", 5 * 60 * 1000),
 };
 
+export const OPENCODE_FREE_LANE_CONFIG = {
+  mode: envChoice("OPENCODE_FREE_LANE", ["auto", "direct", "proxy", "off"], "auto"),
+};
+
 // SearXNG endpoint used by the unauthenticated web-search provider.
 // Configure this for a separate Docker service or remote SearXNG instance.
 export const SEARXNG_URL = envUrl("SEARXNG_URL", "http://localhost:8888/search");

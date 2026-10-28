@@ -22,6 +22,7 @@ import { handleStreamingResponse, buildOnStreamComplete } from "./chatCore/strea
 import { detectClientTool, isNativePassthrough } from "../utils/clientDetector.js";
 import { dedupeTools } from "../utils/toolDeduper.js";
 import { takeRenamedToolNames } from "../utils/opencodeFingerprint.js";
+import { resolveOpencodeFreeLane } from "../utils/opencodeFreeLane.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { injectPonytail } from "../rtk/ponytail.js";
 import { injectCustomPrompt } from "../rtk/customPrompt.js";
@@ -350,7 +351,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     log, provider, model, reqTag
   });
 
-  const proxyOptions = {
+  let proxyOptions = {
     connectionProxyEnabled: credentials?.providerSpecificData?.connectionProxyEnabled === true,
     connectionProxyUrl: credentials?.providerSpecificData?.connectionProxyUrl || "",
     connectionNoProxy: credentials?.providerSpecificData?.connectionNoProxy || "",
@@ -388,6 +389,12 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (proxyOptions.connectionProxyEnabled && proxyOptions.connectionNoProxy) {
     const connectionName = credentials?.connectionName || credentials?.connectionId || "unknown";
     log?.debug?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${connectionName} | no_proxy=${proxyOptions.connectionNoProxy}`);
+  }
+
+  const freeLane = resolveOpencodeFreeLane(provider, proxyOptions);
+  if (freeLane.applied) {
+    proxyOptions = freeLane.proxyOptions;
+    log?.info?.("PROXY", `${provider.toUpperCase()} | ${model} | free-lane=${freeLane.mode} | ${freeLane.reason}`);
   }
 
   // Execute request
