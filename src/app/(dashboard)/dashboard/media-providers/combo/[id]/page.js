@@ -41,6 +41,7 @@ const EXAMPLE_BODIES = {
 // Map combo.kind → listing route to go back to
 function getListingHref(kind) {
   if (kind === "webSearch" || kind === "webFetch") return "/dashboard/media-providers/web";
+  if (kind === "combo" || kind === "chat" || !kind) return "/dashboard/combos";
   return `/dashboard/media-providers/${kind}`;
 }
 
