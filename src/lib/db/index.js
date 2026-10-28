@@ -65,6 +65,11 @@ export {
   getAutoLkgp, setAutoLkgp, promoteAutoLkgp, clearAutoLkgp,
 } from "./repos/autoComboRepo.js";
 
+// Combo LKGP (per-DB-combo last-known-good model, gated by settings.comboStrategies.<name>.lkgpEnabled)
+export {
+  getComboLkgp, setComboLkgp, clearComboLkgp, getAllComboLkgp,
+} from "./repos/comboLkgpRepo.js";
+
 // Relay LKGP + per-connection health
 export {
   getRelayLkgp, setRelayLkgp, clearRelayLkgp,

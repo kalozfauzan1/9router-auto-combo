@@ -17,6 +17,7 @@ export {
   getModelRanks, setModelRanks, setModelRank, deleteModelRank,
   getAutoHealth, setAutoModelHealth, bumpAutoModelFailure, resetAutoModelFailure, clearAutoHealth,
   getAutoLkgp, setAutoLkgp, promoteAutoLkgp, clearAutoLkgp,
+  getComboLkgp, setComboLkgp, clearComboLkgp, getAllComboLkgp,
   getRelayLkgp, setRelayLkgp, clearRelayLkgp,
   getRelayHealth, getRelayHealthForModel,
   bumpRelayFailure, noteRelayIdentityFail, resetRelayHealth,

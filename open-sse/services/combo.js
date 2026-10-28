@@ -365,6 +365,10 @@ export async function handleComboChat({
   sessionSticky = true,
   confidenceThreshold = 0.8,
   resolveSmartChoice = null,
+  comboLkgp = null,
+  noteComboSuccess = null,
+  noteComboFailure = null,
+  clearComboLkgp = null,
 }) {
   let rotatedModels = models;
   let activeStickyModel = null;
@@ -463,6 +467,14 @@ export async function handleComboChat({
     }
   }
   
+  // Combo LKGP: pin the last-known-good model first so we don't re-hit dead models.
+  if (typeof comboLkgp === "string" && comboLkgp.includes("/") && models.includes(comboLkgp)) {
+    if (rotatedModels[0] !== comboLkgp) {
+      log.info?.("COMBO", `combo LKGP pin → ${comboLkgp}`);
+    }
+    rotatedModels = [comboLkgp, ...rotatedModels.filter((m) => m !== comboLkgp)];
+  }
+
   let lastError = null;
   let earliestRetryAfter = null;
   let lastStatus = null;
@@ -520,11 +532,13 @@ export async function handleComboChat({
           }
 
           log.info("COMBO", `Model ${modelStr} succeeded`);
+          if (typeof noteComboSuccess === "function") noteComboSuccess(modelStr).catch?.(() => {});
           return result;
         }
 
         if (peeked.outcome === "content") {
           log.info("COMBO", `Model ${modelStr} succeeded${peeked.timedOut ? " (peek deadline; committed)" : ""}`);
+          if (typeof noteComboSuccess === "function") noteComboSuccess(modelStr).catch?.(() => {});
           return peeked.response;
         }
 
@@ -640,6 +654,7 @@ export async function handleComboChat({
   const allDisabled = lastError && lastError.toLowerCase().includes("no credentials");
   const status = allDisabled ? 503 : (lastStatus || 503);
   const msg = lastError || "All combo models unavailable";
+  if (typeof clearComboLkgp === "function") clearComboLkgp().catch?.(() => {});
 
   if (earliestRetryAfter) {
     const retryHuman = formatRetryAfter(earliestRetryAfter);

@@ -9,6 +9,7 @@ import {
 } from "../services/auth.js";
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
 import { getSettings } from "@/lib/localDb";
+import { getComboLkgp, setComboLkgp, clearComboLkgp } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
@@ -157,6 +158,14 @@ export async function handleChat(request, clientRawRequest = null) {
 
     const comboStickyLimit = settings.comboStickyRoundRobinLimit;
     const comboCfg = comboStrategies[modelStr] || {};
+    // Combo LKGP: only active when explicitly enabled per-combo.
+    const comboLkgpEnabled = comboCfg.lkgpEnabled === true;
+    const comboLkgp = comboLkgpEnabled ? await getComboLkgp(modelStr).catch(() => null) : null;
+    const comboLkgpDeps = comboLkgpEnabled ? {
+      comboLkgp,
+      noteComboSuccess: (m) => (typeof m === "string" && m.includes("/")) ? setComboLkgp(modelStr, m).catch(() => null) : null,
+      clearComboLkgp: () => clearComboLkgp(modelStr).catch(() => null),
+    } : {};
     log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
     return handleComboChat({
       body,
@@ -181,6 +190,7 @@ export async function handleChat(request, clientRawRequest = null) {
             log,
           })
         : null,
+      ...comboLkgpDeps,
     });
   }
 
@@ -265,6 +275,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const comboCfg = comboStrategies[modelStr] || {};
       const nestedSession = resolveSessionIdentity({ headers: clientRawRequest?.headers, body });
       const nestedSessionId = nestedSession?.sessionId || null;
+      const nestedLkgpEnabled = comboCfg.lkgpEnabled === true;
+      const nestedComboLkgp = nestedLkgpEnabled ? await getComboLkgp(modelStr).catch(() => null) : null;
+      const nestedLkgpDeps = nestedLkgpEnabled ? {
+        comboLkgp: nestedComboLkgp,
+        noteComboSuccess: (m) => (typeof m === "string" && m.includes("/")) ? setComboLkgp(modelStr, m).catch(() => null) : null,
+        clearComboLkgp: () => clearComboLkgp(modelStr).catch(() => null),
+      } : {};
       log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
       return handleComboChat({
         body,
@@ -289,6 +306,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
               log,
             })
           : null,
+        ...nestedLkgpDeps,
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
