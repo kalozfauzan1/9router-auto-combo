@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { isRelayEgress, resolveOpencodeFreeLane, resolveOpencodeFreeLaneMode, shouldBypassRelayPool } from "../../open-sse/utils/opencodeFreeLane.js";
 import { OPENCODE_FREE_LANE_CONFIG } from "../../open-sse/config/runtimeConfig.js";
+import { resolveEffectiveProxyUrl } from "../../open-sse/utils/proxyResolution.js";
 
 const baseProxy = {
   connectionProxyEnabled: true,
@@ -51,6 +52,7 @@ describe("resolveOpencodeFreeLane", () => {
     expect(res.proxyOptions.connectionProxyAlternates).toEqual([]);
     expect(res.proxyOptions.proxyPoolId).toBeNull();
     expect(res.proxyOptions.strictProxy).toBe(false);
+    expect(res.proxyOptions.freeLaneDirect).toBe(true);
     expect(JSON.stringify(po)).toBe(before);
   });
 
@@ -70,6 +72,7 @@ describe("resolveOpencodeFreeLane", () => {
     expect(res.proxyOptions.vercelRelayUrl).toBe("");
     expect(res.proxyOptions.connectionProxyEnabled).toBe(true);
     expect(res.proxyOptions.connectionProxyUrl).toBe("http://proxy.example:8080");
+    expect(res.proxyOptions.freeLaneDirect).toBe(false);
   });
 
   it("auto mode with relay-only becomes fully direct", () => {
@@ -92,6 +95,31 @@ describe("resolveOpencodeFreeLane", () => {
     expect(res.proxyOptions.connectionProxyAlternates).toEqual([]);
     expect(res.proxyOptions.proxyPoolId).toBeNull();
     expect(res.proxyOptions.strictProxy).toBe(false);
+    expect(res.proxyOptions.freeLaneDirect).toBe(true);
+  });
+
+  it("auto mode with relay primary + pool id + relay alternates clears everything", () => {
+    const po = {
+      connectionProxyEnabled: false,
+      connectionProxyUrl: "",
+      connectionNoProxy: "",
+      vercelRelayUrl: "https://relay.example",
+      proxyPoolId: "pool-1",
+      strictProxy: true,
+      connectionProxyAlternates: [
+        { vercelRelayUrl: "https://relay-alt.example" },
+      ],
+    };
+    const res = resolveOpencodeFreeLane("opencode", po, "auto");
+    expect(res.applied).toBe(true);
+    expect(res.reason).toBe("relay-only");
+    expect(res.proxyOptions.connectionProxyEnabled).toBe(false);
+    expect(res.proxyOptions.connectionProxyUrl).toBe("");
+    expect(res.proxyOptions.proxyPoolId).toBeNull();
+    expect(res.proxyOptions.strictProxy).toBe(false);
+    expect(res.proxyOptions.vercelRelayUrl).toBe("");
+    expect(res.proxyOptions.connectionProxyAlternates).toEqual([]);
+    expect(res.proxyOptions.freeLaneDirect).toBe(true);
   });
 
   it("auto mode with relay+connect keeps connect and drops relay", () => {
@@ -182,6 +210,7 @@ describe("resolveOpencodeFreeLane", () => {
     expect(res.proxyOptions.connectionProxyAlternates).toHaveLength(1);
     expect(res.proxyOptions.connectionProxyAlternates[0].connectionProxyUrl).toBe("http://alt2.example:8080");
     expect(res.proxyOptions.connectionProxyAlternates[0].vercelRelayUrl).toBe("");
+    expect(res.proxyOptions.freeLaneDirect).toBe(false);
   });
 
   it("auto with connect primary + relay alternate drops alternate and keeps primary", () => {
@@ -290,6 +319,43 @@ describe("resolveOpencodeFreeLane", () => {
 
     it("returns false for null", () => {
       expect(shouldBypassRelayPool(null)).toBe(false);
+    });
+  });
+
+  describe("resolveEffectiveProxyUrl", () => {
+    it("returns direct when freeLaneDirect is true even with HTTPS_PROXY set", () => {
+      const original = process.env.HTTPS_PROXY;
+      process.env.HTTPS_PROXY = "http://env-proxy.example:3128";
+
+      try {
+        const result = resolveEffectiveProxyUrl("https://example.com", { freeLaneDirect: true });
+        expect(result).toEqual({ url: null, source: "direct" });
+      } finally {
+        if (original === undefined) {
+          delete process.env.HTTPS_PROXY;
+        } else {
+          process.env.HTTPS_PROXY = original;
+        }
+      }
+    });
+
+    it("connection proxy still wins over env proxy", () => {
+      const original = process.env.HTTPS_PROXY;
+      process.env.HTTPS_PROXY = "http://env-proxy.example:3128";
+
+      try {
+        const result = resolveEffectiveProxyUrl("https://example.com", {
+          connectionProxyEnabled: true,
+          connectionProxyUrl: "http://conn.example:8080",
+        });
+        expect(result).toEqual({ url: "http://conn.example:8080", source: "connection" });
+      } finally {
+        if (original === undefined) {
+          delete process.env.HTTPS_PROXY;
+        } else {
+          process.env.HTTPS_PROXY = original;
+        }
+      }
     });
   });
 });

@@ -61,6 +61,7 @@ export function resolveOpencodeFreeLane(provider, proxyOptions, mode = OPENCODE_
       connectionProxyAlternates: [],
       proxyPoolId: null,
       strictProxy: false,
+      freeLaneDirect: true,
     };
     return { applied: true, mode, reason: "forced-direct", proxyOptions: next };
   }
@@ -93,9 +94,10 @@ export function resolveOpencodeFreeLane(provider, proxyOptions, mode = OPENCODE_
         proxyPoolId: promoted.proxyPoolId,
         strictProxy: promoted.strictProxy,
         connectionProxyAlternates: normalizedAlternates.slice(1),
+        freeLaneDirect: false,
       };
       reason = "relay-promoted";
-    } else if (!connectPrimary && connectAlternates.length === 0 && !poolPrimary) {
+    } else if (!connectPrimary && connectAlternates.length === 0) {
       next = {
         ...next,
         connectionProxyEnabled: false,
@@ -104,10 +106,11 @@ export function resolveOpencodeFreeLane(provider, proxyOptions, mode = OPENCODE_
         connectionProxyAlternates: [],
         proxyPoolId: null,
         strictProxy: false,
+        freeLaneDirect: true,
       };
       reason = "relay-only";
     } else {
-      next = { ...next, connectionProxyAlternates: normalizedAlternates };
+      next = { ...next, connectionProxyAlternates: normalizedAlternates, freeLaneDirect: false };
       reason = "relay-stripped";
     }
   } else {

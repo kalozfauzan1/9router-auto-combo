@@ -63,6 +63,8 @@ export function resolveEffectiveProxyUrl(targetUrl, proxyOptions = null) {
   const connectionProxyUrl = resolveConnectionProxyUrl(targetUrl, proxyOptions);
   if (connectionProxyUrl) return { url: connectionProxyUrl, source: "connection" };
 
+  if (proxyOptions?.freeLaneDirect === true) return { url: null, source: "direct" };
+
   const envProxyUrl = normalizeProxyUrl(getEnvProxyUrl(targetUrl));
   if (envProxyUrl) return { url: envProxyUrl, source: "env" };
 
