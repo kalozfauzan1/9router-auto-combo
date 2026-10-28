@@ -53,6 +53,7 @@ export default function ComboDetailPage() {
   const [nameError, setNameError] = useState("");
   const [providers, setProviders] = useState([]);
   const [roundRobin, setRoundRobin] = useState(false);
+  const [lkgpEnabled, setLkgpEnabled] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
   const [logs, setLogs] = useState([]);
   const [testing, setTesting] = useState(false);
@@ -85,6 +86,7 @@ export default function ComboDetailPage() {
       setProviders(c.models || []);
       const s = settingsRes.ok ? await settingsRes.json() : {};
       setRoundRobin(s.comboStrategies?.[c.name]?.fallbackStrategy === "round-robin");
+      setLkgpEnabled(s.comboStrategies?.[c.name]?.lkgpEnabled === true);
       const allLogs = logsRes.ok ? await logsRes.json() : [];
       setLogs(allLogs.filter((l) => typeof l === "string" && l.includes(c.name)).slice(0, 50));
     } catch { /* noop */ }
@@ -154,8 +156,33 @@ export default function ComboDetailPage() {
     const settingsRes = await fetch("/api/settings", { cache: "no-store" });
     const s = settingsRes.ok ? await settingsRes.json() : {};
     const updated = { ...(s.comboStrategies || {}) };
-    if (enabled) updated[combo.name] = { fallbackStrategy: "round-robin" };
-    else delete updated[combo.name];
+    // Preserve other keys (e.g. lkgpEnabled) on this combo's entry.
+    const prev = updated[combo.name] || {};
+    if (enabled) updated[combo.name] = { ...prev, fallbackStrategy: "round-robin" };
+    else {
+      const { fallbackStrategy, ...rest } = prev;
+      updated[combo.name] = rest;
+      if (Object.keys(rest).length === 0) delete updated[combo.name];
+    }
+    await fetch("/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ comboStrategies: updated }),
+    });
+  };
+
+  const handleToggleLkgp = async (enabled) => {
+    setLkgpEnabled(enabled);
+    const settingsRes = await fetch("/api/settings", { cache: "no-store" });
+    const s = settingsRes.ok ? await settingsRes.json() : {};
+    const updated = { ...(s.comboStrategies || {}) };
+    const prev = updated[combo.name] || {};
+    if (enabled) updated[combo.name] = { ...prev, lkgpEnabled: true };
+    else {
+      const { lkgpEnabled, ...rest } = prev;
+      updated[combo.name] = rest;
+      if (Object.keys(rest).length === 0) delete updated[combo.name];
+    }
     await fetch("/api/settings", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -274,6 +301,13 @@ export default function ComboDetailPage() {
               <p className="text-xs text-text-muted">Rotate providers across requests instead of strict fallback order.</p>
             </div>
             <Toggle checked={roundRobin} onChange={handleToggleRoundRobin} />
+          </div>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">Combo LKGP</p>
+              <p className="text-xs text-text-muted">Pin the last successful model to the front on every request, skipping known-dead members.</p>
+            </div>
+            <Toggle checked={lkgpEnabled} onChange={handleToggleLkgp} />
           </div>
         </div>
       </Card>
