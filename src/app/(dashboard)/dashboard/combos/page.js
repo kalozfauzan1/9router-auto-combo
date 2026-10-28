@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
+import Link from "next/link";
+import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { restrictToVerticalAxis, restrictToParentElement } from "@dnd-kit/modifiers";
@@ -816,6 +817,14 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
               </span>
               <span className="text-[10px] leading-tight">Copy</span>
             </button>
+            <Link
+              href={`/dashboard/media-providers/combo/${combo.id}`}
+              className="flex flex-col items-center rounded px-2 py-1 text-text-muted transition-colors hover:bg-black/5 hover:text-primary dark:hover:bg-white/5"
+              title="Combo settings"
+            >
+              <span className="material-symbols-outlined text-[18px]">settings</span>
+              <span className="text-[10px] leading-tight">Settings</span>
+            </Link>
             <button
               onClick={onEdit}
               className="flex flex-col items-center rounded px-2 py-1 text-text-muted transition-colors hover:bg-black/5 hover:text-primary dark:hover:bg-white/5"
