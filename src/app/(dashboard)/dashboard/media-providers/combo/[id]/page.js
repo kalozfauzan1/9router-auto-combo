@@ -55,6 +55,7 @@ export default function ComboDetailPage() {
   const [providers, setProviders] = useState([]);
   const [roundRobin, setRoundRobin] = useState(false);
   const [lkgpEnabled, setLkgpEnabled] = useState(false);
+  const [comboStrategy, setComboStrategy] = useState("fallback");
   const [showPicker, setShowPicker] = useState(false);
   const [logs, setLogs] = useState([]);
   const [testing, setTesting] = useState(false);
@@ -88,6 +89,7 @@ export default function ComboDetailPage() {
       const s = settingsRes.ok ? await settingsRes.json() : {};
       setRoundRobin(s.comboStrategies?.[c.name]?.fallbackStrategy === "round-robin");
       setLkgpEnabled(s.comboStrategies?.[c.name]?.lkgpEnabled === true);
+      setComboStrategy(s.comboStrategies?.[c.name]?.fallbackStrategy || "fallback");
       const allLogs = logsRes.ok ? await logsRes.json() : [];
       setLogs(allLogs.filter((l) => typeof l === "string" && l.includes(c.name)).slice(0, 50));
     } catch { /* noop */ }
@@ -154,6 +156,7 @@ export default function ComboDetailPage() {
 
   const handleToggleRoundRobin = async (enabled) => {
     setRoundRobin(enabled);
+    setComboStrategy(enabled ? "round-robin" : "fallback");
     const settingsRes = await fetch("/api/settings", { cache: "no-store" });
     const s = settingsRes.ok ? await settingsRes.json() : {};
     const updated = { ...(s.comboStrategies || {}) };
@@ -306,9 +309,17 @@ export default function ComboDetailPage() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm font-medium">Combo LKGP</p>
-              <p className="text-xs text-text-muted">Pin the last successful model to the front on every request, skipping known-dead members.</p>
+              <p className="text-xs text-text-muted">
+                {comboStrategy === "smart"
+                  ? "Disabled while Smart Router is active — LKGP would override System One's per-request choice."
+                  : "Pin the last successful model to the front on every request, skipping known-dead members."}
+              </p>
             </div>
-            <Toggle checked={lkgpEnabled} onChange={handleToggleLkgp} />
+            <Toggle
+              checked={lkgpEnabled}
+              onChange={handleToggleLkgp}
+              disabled={comboStrategy === "smart"}
+            />
           </div>
         </div>
       </Card>
