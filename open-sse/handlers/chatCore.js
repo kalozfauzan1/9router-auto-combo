@@ -62,7 +62,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, customPromptEnabled, customPrompt, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides }) {
+export async function handleChatCore({ signal, body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, customPromptEnabled, customPrompt, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -403,7 +403,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       credentials,
       providerSessionId: sessionSeed,
       clientTool,
-      signal: streamController.signal,
+      signal: signal ? AbortSignal.any([signal, streamController.signal]) : streamController.signal,
       log,
       proxyOptions,
       providerOverrides,
@@ -472,7 +472,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
             credentials,
             providerSessionId: sessionSeed,
             clientTool,
-            signal: streamController.signal,
+            signal: signal ? AbortSignal.any([signal, streamController.signal]) : streamController.signal,
             log,
             proxyOptions,
             providerOverrides,

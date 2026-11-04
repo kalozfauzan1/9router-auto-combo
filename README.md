@@ -101,6 +101,8 @@ Claude Code/Codex/OpenClaw/Cursor/Cline Settings:
 
 This repository package is private (`9router-app`), so source/Docker execution is the expected local development path.
 
+Local implementation status and validation limits: [Combo LKGP health recovery](docs/plans/combo-lkgp-health-recovery.md).
+
 ```bash
 cp .env.example .env
 npm install

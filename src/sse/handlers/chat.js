@@ -9,6 +9,7 @@ import {
 } from "../services/auth.js";
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
 import { getSettings } from "@/lib/localDb";
+import { comboHealthService } from "../services/comboHealthService.js";
 import { getComboLkgp, setComboLkgp, clearComboLkgp } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
@@ -31,6 +32,28 @@ import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
 import { resolveSmartChoice } from "../services/systemoneRouter.js";
+
+// Shared service, but a per-call executor owns auth/endpoint context and probe abort.
+async function comboHealthDeps(comboCfg, comboStrategy, request, apiKey, comboName) {
+  if (comboCfg.lkgpEnabled !== true) return {};
+  // Non-fallback strategies retain their existing legacy LKGP behavior.
+  if (comboStrategy !== "fallback") return {
+    comboLkgp: await getComboLkgp(comboName).catch(() => null),
+    noteComboSuccess: (m) => setComboLkgp(comboName, m).catch(() => null),
+    clearComboLkgp: () => clearComboLkgp(comboName).catch(() => null),
+  };
+  return {
+    comboHealth: comboHealthService,
+    executeHealthProbe: ({ model, body, signal }) => {
+      // Do not clone the consumed user body/history or leak raw client payload.
+      const probeRequest = new Request(request?.url || "http://localhost/v1/chat/completions", {
+        method: "POST", headers: request?.headers, signal,
+      });
+      const raw = { endpoint: new URL(probeRequest.url).pathname, headers: Object.fromEntries(probeRequest.headers), body };
+      return handleSingleModelChat(body, model, raw, probeRequest, apiKey);
+    },
+  };
+}
 
 /**
  * Handle chat completion request
@@ -158,14 +181,7 @@ export async function handleChat(request, clientRawRequest = null) {
 
     const comboStickyLimit = settings.comboStickyRoundRobinLimit;
     const comboCfg = comboStrategies[modelStr] || {};
-    // Combo LKGP: only active when explicitly enabled per-combo.
-    const comboLkgpEnabled = comboCfg.lkgpEnabled === true;
-    const comboLkgp = comboLkgpEnabled ? await getComboLkgp(modelStr).catch(() => null) : null;
-    const comboLkgpDeps = comboLkgpEnabled ? {
-      comboLkgp,
-      noteComboSuccess: (m) => (typeof m === "string" && m.includes("/")) ? setComboLkgp(modelStr, m).catch(() => null) : null,
-      clearComboLkgp: () => clearComboLkgp(modelStr).catch(() => null),
-    } : {};
+    const comboLkgpDeps = await comboHealthDeps(comboCfg, comboStrategy, request, apiKey, modelStr);
     log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
     return handleComboChat({
       body,
@@ -275,13 +291,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const comboCfg = comboStrategies[modelStr] || {};
       const nestedSession = resolveSessionIdentity({ headers: clientRawRequest?.headers, body });
       const nestedSessionId = nestedSession?.sessionId || null;
-      const nestedLkgpEnabled = comboCfg.lkgpEnabled === true;
-      const nestedComboLkgp = nestedLkgpEnabled ? await getComboLkgp(modelStr).catch(() => null) : null;
-      const nestedLkgpDeps = nestedLkgpEnabled ? {
-        comboLkgp: nestedComboLkgp,
-        noteComboSuccess: (m) => (typeof m === "string" && m.includes("/")) ? setComboLkgp(modelStr, m).catch(() => null) : null,
-        clearComboLkgp: () => clearComboLkgp(modelStr).catch(() => null),
-      } : {};
+      const nestedLkgpDeps = await comboHealthDeps(comboCfg, comboStrategy, request, apiKey, modelStr);
       log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
       return handleComboChat({
         body,
@@ -363,6 +373,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
+      signal: request?.signal,
       modelInfo: { provider, model },
       credentials: refreshedCredentials,
       log,
