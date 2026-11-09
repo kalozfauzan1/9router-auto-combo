@@ -60,8 +60,8 @@ describe("auto/smart atomic failure tracking", () => {
     );
     const health = await repo.getAutoHealth();
     expect(health[model].failures).toBe(20);
-    // 20th consecutive failure pins at the 60m ladder cap.
-    expect(health[model].cooldownUntil).toBe(nowMs + 3_600_000);
+    // Fixed 5m cooldown cap per auto recovery design.
+    expect(health[model].cooldownUntil).toBe(nowMs + 300_000);
   });
 
   it("resets failure state without disturbing the failure count term", async () => {
