@@ -35,11 +35,19 @@ describe("detectRequiredCapabilities", () => {
     expect(r.has("vision")).toBe(true);
   });
 
-  it("web_search tool -> search", () => {
+  it("web_search alone leaves search auto-switch disabled", () => {
+    // Search auto-switch is intentionally disabled: the feature is not wired yet.
     const r = detectRequiredCapabilities({ messages: [{ role: "user", content: "q" }], tools: [
       { type: "web_search" },
     ] });
-    expect(r.has("search")).toBe(true);
+    expect([...r]).toEqual([]);
+  });
+
+  it("image plus web_search detects vision without enabling search auto-switch", () => {
+    const r = detectRequiredCapabilities({ messages: [{ role: "user", content: [
+      { type: "image_url", image_url: { url: "x" } },
+    ] }], tools: [{ type: "web_search" }] });
+    expect([...r]).toEqual(["vision"]);
   });
 
   it("responses input_image -> vision", () => {
@@ -69,6 +77,32 @@ describe("reorderByCapabilities", () => {
     const models = ["deepseek/deepseek-chat", "deepseek/deepseek-reasoner"];
     const out = reorderByCapabilities(models, new Set(["vision"]));
     expect(out).toBe(models);
+  });
+
+  it("preserves identity and input for already ordered mixed capabilities", () => {
+    const expected = [
+      "anthropic/claude-sonnet-4.6", "opencode-go/mimo-v2.5",
+      "deepseek/deepseek-chat", "deepseek/deepseek-reasoner",
+    ];
+    const models = Object.freeze([...expected]);
+    const out = reorderByCapabilities(models, new Set(["vision"]));
+    expect(out).toBe(models);
+    expect(out).toEqual(expected);
+    expect(models).toEqual(expected);
+  });
+
+  it("stably prioritizes matching models without mutating or dropping fallbacks", () => {
+    const expectedInput = [
+      "deepseek/deepseek-chat", "anthropic/claude-sonnet-4.6",
+      "deepseek/deepseek-reasoner", "opencode-go/mimo-v2.5",
+    ];
+    const models = Object.freeze([...expectedInput]);
+    const out = reorderByCapabilities(models, new Set(["vision"]));
+    expect(out).not.toBe(models);
+    expect(out).toEqual([
+      expectedInput[1], expectedInput[3], expectedInput[0], expectedInput[2],
+    ]);
+    expect(models).toEqual(expectedInput);
   });
 
   it("single model -> unchanged", () => {

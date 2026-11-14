@@ -98,10 +98,11 @@ export function reorderByCapabilities(models, required) {
   };
 
   // Stable sort by tier (Array.prototype.sort is stable in modern engines).
-  return models
+  const ranked = models
     .map((m, i) => ({ m, i, t: tierOf(m) }))
-    .sort((a, b) => a.t - b.t || a.i - b.i)
-    .map((x) => x.m);
+    .sort((a, b) => a.t - b.t || a.i - b.i);
+  // Preserve identity when the stable ranking did not move any model.
+  return ranked.every((entry, i) => entry.i === i) ? models : ranked.map((x) => x.m);
 }
 
 /**
