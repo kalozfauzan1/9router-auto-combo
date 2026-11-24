@@ -202,6 +202,28 @@ describe("live per-account catalogs", () => {
     expect(values).toContain("zd/zed-model");
     expect(liveModelCaps({ id: "zed-model", name: "Zed Model" })).toBeUndefined();
   });
+
+  it("includes GLM 5.3 Flash in the active CommandCode group under its alias", () => {
+    const connection = { id: "conn-1", provider: "commandcode", isActive: true };
+    const groups = buildModelGroups({
+      connections: [connection],
+      allConnections: [connection],
+      modelAliases: {},
+      customModels: [],
+      disabledModels: {},
+      liveModels: { commandcode: [{ id: "z-ai/glm-5.3-flash", name: "GLM 5.3 Flash" }] },
+    });
+
+    expect(groups.commandcode.models.map((model) => model.value)).toContain("cmc/z-ai/glm-5.3-flash");
+
+    const modalSrc = fs.readFileSync(
+      new URL("../../src/shared/components/ModelSelectModal.js", import.meta.url),
+      "utf-8"
+    );
+    expect(modalSrc).toMatch(/import\s*\{[^}]*\bbuildModelGroups\b[^}]*\}\s*from\s*["'][^"']*\/selectableModels(?:\.js)?["']/);
+    expect(modalSrc).toMatch(/\bbuildModelGroups\s*\(\s*\{[^)]*?[,\{]\s*liveModels\s*(?:[:,}])/);
+    expect(modalSrc).not.toMatch(/\bproviderInfo\s*\.\s*passthroughModels\b/);
+  });
 });
 
 describe("live rows carry the provider's capability data through to caps", () => {

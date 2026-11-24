@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import { getDeactivatedProviderIds } from "@/shared/utils/connectionStatus.js";
+import { buildModelGroups } from "@/shared/utils/selectableModels.js";
 
 describe("getDeactivatedProviderIds", () => {
   it("identifies providers with connections where all are isActive === false", () => {
@@ -43,24 +44,51 @@ describe("getDeactivatedProviderIds", () => {
   });
 });
 
-describe("ModelSelectModal source verification for deactivated providers", () => {
-  const fileUrl = new URL("../../src/shared/components/ModelSelectModal.js", import.meta.url);
-  const src = fs.readFileSync(fileUrl, "utf-8");
+describe("buildModelGroups with deactivated providers", () => {
+  const provider = "openai-compatible-chat-1";
+  const providerNodes = [{ id: provider, prefix: "local" }];
+  const customModels = [{ providerAlias: provider, id: "chat-model" }];
+  const inactive = { provider, isActive: false };
 
-  it("imports and uses getDeactivatedProviderIds", () => {
-    expect(src).toContain("getDeactivatedProviderIds");
-    expect(src).toContain("deactivatedProviderIds");
+  it("offers a keyless compatible node only when it is not paused", () => {
+    const inputs = { connections: [], providerNodes, customModels };
+    expect(buildModelGroups(inputs)[provider]?.models).toEqual([
+      expect.objectContaining({ value: "local/chat-model", isCustom: true }),
+    ]);
+    expect(buildModelGroups({ ...inputs, allConnections: [inactive] })[provider]).toBeUndefined();
   });
 
-  it("filters compatibleNodeIds by !deactivatedProviderIds.has(alias)", () => {
-    expect(src).toMatch(/!deactivatedProviderIds\.has\(alias\)/);
+  it("keeps a compatible node visible when another connection is active", () => {
+    const active = { provider, isActive: true };
+    const groups = buildModelGroups({
+      connections: [active],
+      allConnections: [inactive, active],
+      providerNodes,
+      customModels,
+    });
+    expect(groups[provider]?.models.map((model) => model.value)).toEqual(["local/chat-model"]);
   });
 
-  it("filters providerIdsToShow by !deactivatedProviderIds.has(id)", () => {
-    expect(src).toMatch(/!deactivatedProviderIds\.has\(id\)/);
+  it("does not reintroduce a paused no-auth provider through its custom models", () => {
+    const inputs = {
+      connections: [],
+      customModels: [{ providerAlias: "oc", id: "local-custom", kind: "llm" }],
+    };
+    expect(buildModelGroups(inputs).opencode?.models).toContainEqual(
+      expect.objectContaining({ value: "oc/local-custom", isCustom: true }),
+    );
+    const groups = buildModelGroups({
+      ...inputs,
+      allConnections: [{ provider: "opencode", isActive: false }],
+    });
+    expect(groups.opencode).toBeUndefined();
   });
+});
 
+describe("ModelSelectModal source verification", () => {
   it("fetches /api/providers on modal open", () => {
+    const fileUrl = new URL("../../src/shared/components/ModelSelectModal.js", import.meta.url);
+    const src = fs.readFileSync(fileUrl, "utf-8");
     expect(src).toContain('fetch("/api/providers")');
   });
 });
